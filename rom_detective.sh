@@ -303,8 +303,8 @@ compare_hash_files() {
             else
                 echo "$filepath" >> "$temp_changed"
             fi
-        done < "$changed_output"
-        echo >&2
+        done < "$changed_output" 
+        printf "\r\033[K" >&2 # Clear the progress line before printing the summary
         
         # Replace the changed file list with filtered results
         mv "$temp_changed" "$changed_output"
