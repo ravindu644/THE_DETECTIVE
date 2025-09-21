@@ -1,0 +1,498 @@
+#!/bin/bash
+
+# ==============================================================================
+# The Detective - A Forensic Android ROM Comparison Tool
+# Version: 2.0 (REWRITTEN - PURE BASH APPROACH)
+# Author: ravindu644
+# ==============================================================================
+#
+# This script performs a deep, forensic comparison between two or three
+# unpacked Android ROM directories to identify all modifications.
+#
+# MAJOR REWRITE:
+# - Eliminated problematic comm/join commands
+# - Pure bash/awk approach for file comparison
+# - More reliable hash-based file comparison logic
+# - Better progress reporting and error handling
+# ==============================================================================
+
+# --- Configuration and Style ---
+CONFIG_FILE="detective.conf"
+BOLD="\033[1m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RESET="\033[0m"
+
+# --- Functions ---
+
+# Banner function
+print_banner() {
+  echo -e "${BOLD}${GREEN}"
+  echo "┌───────────────────────────────────────────┐"
+  echo "│     The Detective - ROM Analysis Tool     │"
+  echo "│              v2.0 - REWRITTEN             │"
+  echo "└───────────────────────────────────────────┘"
+  echo -e "${RESET}"
+}
+
+# Function to check for root privileges
+check_root() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo "Error: This script requires root privileges to read all file permissions and install dependencies."
+        echo "Please run again with 'sudo'."
+        exit 1
+    fi
+}
+
+# Function to check for and install required packages
+check_and_install_deps() {
+    echo "--- Phase 0: Verifying Dependencies ---"
+    
+    declare -A deps=(
+        ["diffutils"]="diff"
+        ["binutils"]="readelf strings"
+        ["default-jre-headless"]="java"
+        ["wget"]="wget"
+        ["findutils"]="find"
+        ["sed"]="sed"
+        ["coreutils"]="sha256sum"
+        ["util-linux"]="hexdump"
+        ["file"]="file"
+        ["gawk"]="awk"
+    )
+    
+    packages_to_install=()
+    all_deps_met=true
+
+    for pkg in "${!deps[@]}"; do
+        for cmd in ${deps[$pkg]}; do
+            if ! command -v "$cmd" &> /dev/null; then
+                echo "Dependency missing: '$cmd' (from package '$pkg')"
+                packages_to_install+=("$pkg")
+                all_deps_met=false
+                break
+            fi
+        done
+    done
+
+    if [ "$all_deps_met" = false ]; then
+        echo
+        echo "Attempting to install missing system packages..."
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y
+        apt-get install -y "${packages_to_install[@]}"
+        echo "System dependencies installed."
+    else
+        echo "All system dependencies are met."
+    fi
+    echo
+}
+
+# Function to check for and install Apktool
+check_and_install_apktool() {
+    if ! command -v "apktool" &> /dev/null; then
+        echo "Apktool not found. Attempting to install it system-wide..."
+        
+        local wrapper_url="https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool"
+        local jar_url="https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar"
+
+        echo " -> Downloading Apktool wrapper script..."
+        wget -q -O "/tmp/apktool" "$wrapper_url"
+        
+        echo " -> Downloading Apktool JAR file (this may take a moment)..."
+        wget -q -O "/tmp/apktool.jar" "$jar_url"
+
+        if [[ ! -f "/tmp/apktool" || ! -f "/tmp/apktool.jar" ]]; then
+            echo "Error: Failed to download Apktool. Please check your internet connection and try again."
+            exit 1
+        fi
+        
+        echo " -> Installing..."
+        mv "/tmp/apktool" "/usr/local/bin/apktool"
+        mv "/tmp/apktool.jar" "/usr/local/bin/apktool.jar"
+        chmod +x "/usr/local/bin/apktool"
+        chmod +x "/usr/local/bin/apktool.jar"
+        
+        echo "Apktool has been installed successfully."
+    else
+        echo "Apktool is already installed."
+    fi
+    echo
+}
+
+# Function to create a default config file if it doesn't exist
+check_and_create_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "Configuration file '$CONFIG_FILE' not found. Creating a default one."
+        
+        cat << 'EOF' > "$CONFIG_FILE"
+# --- Detective Tool Configuration ---
+# This file controls the behavior of the ROM analysis script.
+
+# --- General Settings ---
+CLEANUP_TEMP_FILES="true"
+APKTOOL_COMMAND="apktool"
+IGNORE_LIST=".repack_info"
+
+# --- Binary File Analysis ---
+SKIP_BINARY_ANALYSIS_EXTENSIONS="png jpg mp3 ogg zip dat"
+BINARY_ANALYSIS_METHODS="hexdump strings readelf"
+EOF
+        echo
+        echo "Configuration has been created."
+        read -p "Please review/edit '$CONFIG_FILE' to your liking now, then press [Enter] to begin the analysis."
+    fi
+}
+
+# New function to compare files using pure awk
+compare_hash_files() {
+    local base_hashes="$1"
+    local ported_hashes="$2"
+    local deleted_output="$3"
+    local new_output="$4"
+    local changed_output="$5"
+    
+    echo "Analyzing file differences using AWK-based comparison..."
+    
+    # Use a single AWK script to process both files and generate all outputs
+    awk '
+    BEGIN {
+        print "Processing hash files..." > "/dev/stderr"
+    }
+    
+    # Process base ROM hashes (first file)
+    FNR==NR {
+        # Store base file info: base_files[filepath] = hash
+        base_files[$2] = $1
+        base_count++
+        next
+    }
+    
+    # Process ported ROM hashes (second file)  
+    {
+        filepath = $2
+        ported_hash = $1
+        
+        if (filepath in base_files) {
+            # File exists in both - check if changed
+            if (base_files[filepath] != ported_hash) {
+                print filepath > changed_file
+            }
+            # Mark as processed
+            delete base_files[filepath]
+        } else {
+            # File is new in ported ROM
+            print filepath > new_file
+        }
+        ported_count++
+    }
+    
+    END {
+        # Remaining files in base_files array are deleted files
+        for (filepath in base_files) {
+            print filepath > deleted_file
+        }
+        
+        printf "Processed %d base files and %d ported files\n", base_count, ported_count > "/dev/stderr"
+    }
+    ' changed_file="$changed_output" deleted_file="$deleted_output" new_file="$new_output" \
+      "$base_hashes" "$ported_hashes"
+}
+
+# --- Main Script Execution ---
+
+# Print the banner first
+print_banner
+
+# Initial checks
+check_root
+check_and_install_deps
+check_and_install_apktool
+check_and_create_config
+
+# Load the configuration file
+source "./$CONFIG_FILE"
+
+# --- Phase 1: Initialization ---
+echo
+# Get user input for directories
+read -e -p "[1/3] Enter the path to the Ported/Modified ROM directory: " PORTED_ROM_PATH
+# Sanitize input: remove leading/trailing single or double quotes
+PORTED_ROM_PATH="${PORTED_ROM_PATH%\'}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\'}"
+PORTED_ROM_PATH="${PORTED_ROM_PATH%\"}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\"}"
+if [[ ! -d "$PORTED_ROM_PATH" ]]; then echo "Error: Path not found for Ported ROM -> '$PORTED_ROM_PATH'"; exit 1; fi
+
+read -e -p "[2/3] Enter the path to the original Base ROM directory: " BASE_ROM_PATH
+# Sanitize input
+BASE_ROM_PATH="${BASE_ROM_PATH%\'}"; BASE_ROM_PATH="${BASE_ROM_PATH#\'}"
+BASE_ROM_PATH="${BASE_ROM_PATH%\"}"; BASE_ROM_PATH="${BASE_ROM_PATH#\"}"
+if [[ ! -d "$BASE_ROM_PATH" ]]; then echo "Error: Path not found for Base ROM -> '$BASE_ROM_PATH'"; exit 1; fi
+
+read -e -p "[3/3] OPTIONAL: Enter path to the Target Device's Stock ROM [Press Enter to skip]: " TARGET_STOCK_PATH
+# Sanitize input
+if [[ -n "$TARGET_STOCK_PATH" ]]; then
+    TARGET_STOCK_PATH="${TARGET_STOCK_PATH%\'}"; TARGET_STOCK_PATH="${TARGET_STOCK_PATH#\'}"
+    TARGET_STOCK_PATH="${TARGET_STOCK_PATH%\"}"; TARGET_STOCK_PATH="${TARGET_STOCK_PATH#\"}"
+fi
+
+# Determine mode and validate third path if provided
+ANALYSIS_MODE="DUAL"
+if [[ -n "$TARGET_STOCK_PATH" ]]; then
+    if [[ ! -d "$TARGET_STOCK_PATH" ]]; then
+        echo "Error: Target Stock ROM path not found -> '$TARGET_STOCK_PATH'"
+        exit 1
+    fi
+    ANALYSIS_MODE="TRIPLE"
+    echo "Mode: Triple-Compare"
+else
+    echo "Mode: Dual-Compare"
+fi
+
+# Setup output environment
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+SCRIPT_DIR=$(pwd) # Get the absolute path of the script's execution directory
+OUTPUT_DIR="$SCRIPT_DIR/final_detective_folder_$TIMESTAMP"
+PATCHES_DIR="$OUTPUT_DIR/patches"
+RAW_LISTS_DIR="$OUTPUT_DIR/raw_file_lists"
+TEMP_DIR="$OUTPUT_DIR/temp"
+
+mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
+echo "Results will be saved in: $OUTPUT_DIR"
+
+# --- Phase 2: Hash Generation and Comparison ---
+echo
+echo "--- Phase 2: Generating File Hashes (This may take a while...) ---"
+
+# Create ignore options for the find command
+ignore_opts=()
+for item in $IGNORE_LIST; do
+    ignore_opts+=(-not -path "*/$item/*")
+done
+
+# Hash generation function
+hash_directory() {
+    local dir_path="$1"
+    local output_file="$2"
+    local dir_name="$3"
+    echo "Hashing $dir_name directory..."
+    (cd "$dir_path" && find . -type f "${ignore_opts[@]}" -exec sha256sum {} + > "$output_file")
+}
+
+# Hash all provided directories
+hash_directory "$PORTED_ROM_PATH" "$TEMP_DIR/ported.hashes" "Ported ROM"
+hash_directory "$BASE_ROM_PATH" "$TEMP_DIR/base.hashes" "Base ROM"
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    hash_directory "$TARGET_STOCK_PATH" "$TEMP_DIR/target.hashes" "Target Stock ROM"
+fi
+
+echo "Hash generation complete. Comparing files..."
+
+# Use the new AWK-based comparison method
+compare_hash_files \
+    "$TEMP_DIR/base.hashes" \
+    "$TEMP_DIR/ported.hashes" \
+    "$RAW_LISTS_DIR/01_DELETED_FILES.txt" \
+    "$RAW_LISTS_DIR/03_NEW_FILES.txt" \
+    "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+
+# Handle triple-compare mode for transplanted files
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    echo "Performing Triple-Compare analysis..."
+    
+    # Find files that are identical between ported and target (transplanted)
+    awk '
+    FNR==NR {
+        # Store ported ROM hashes
+        ported_files[$2] = $1
+        next
+    }
+    {
+        # Check target ROM hashes
+        filepath = $2
+        target_hash = $1
+        
+        if (filepath in ported_files && ported_files[filepath] == target_hash) {
+            print filepath
+        }
+    }
+    ' "$TEMP_DIR/ported.hashes" "$TEMP_DIR/target.hashes" > "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
+fi
+
+echo "File comparison complete."
+
+# Print summary of findings
+echo
+echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
+echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
+echo "New files: $(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)"
+echo "Deleted files: $(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)"
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    echo "Transplanted files: $(wc -l < "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" 2>/dev/null || echo 0)"
+fi
+
+# --- Phase 3: Deep Analysis ---
+echo
+echo "--- Phase 3: Performing Deep Analysis on Changed Files ---"
+
+# File classification and analysis function
+analyze_file() {
+    local relative_path="$1"
+    local stock_file="$BASE_ROM_PATH/$relative_path"
+    local ported_file="$PORTED_ROM_PATH/$relative_path"
+    local patch_output_dir
+    patch_output_dir=$(dirname "$PATCHES_DIR/$relative_path")
+    mkdir -p "$patch_output_dir"
+
+    local extension="${relative_path##*.}"
+
+    # 1. APK/JAR Handler
+    if [[ "$extension" == "apk" || "$extension" == "jar" ]]; then
+        local stock_src="$TEMP_DIR/stock_src"
+        local ported_src="$TEMP_DIR/ported_src"
+        rm -rf "$stock_src" "$ported_src"
+
+        $APKTOOL_COMMAND d -f "$stock_file" -o "$stock_src" &> /dev/null
+        $APKTOOL_COMMAND d -f "$ported_file" -o "$ported_src" &> /dev/null
+
+        find "$stock_src" "$ported_src" -name "*.smali" -type f -exec sed -i '/^\s*\.line\s\+[0-9]\+/d' {} + 2>/dev/null
+        
+        diff -urN "$stock_src" "$ported_src" > "$patch_output_dir/$(basename "$relative_path").patch" 2>/dev/null
+        return
+    fi
+    
+    # 2. Skippable Binary Check
+    for skip_ext in $SKIP_BINARY_ANALYSIS_EXTENSIONS; do
+        if [[ "$extension" == "$skip_ext" ]]; then
+            return
+        fi
+    done
+    
+    # 3. Use 'file' command for robust file type detection
+    local mime_type
+    mime_type=$(file -b --mime-type "$ported_file" 2>/dev/null || echo "unknown")
+
+    if [[ "$mime_type" == text/* ]]; then
+        # It's a text file
+        diff -u "$stock_file" "$ported_file" > "$patch_output_dir/$(basename "$relative_path").patch" 2>/dev/null
+    else
+        # It's a binary file
+        for method in $BINARY_ANALYSIS_METHODS; do
+            case "$method" in
+                hexdump)
+                    hexdump -C "$stock_file" > "$TEMP_DIR/stock.hex" 2>/dev/null
+                    hexdump -C "$ported_file" > "$TEMP_DIR/ported.hex" 2>/dev/null
+                    diff -u "$TEMP_DIR/stock.hex" "$TEMP_DIR/ported.hex" > "$patch_output_dir/$(basename "$relative_path").hexdump.patch" 2>/dev/null
+                    ;;
+                strings)
+                    strings "$stock_file" > "$TEMP_DIR/stock.strings" 2>/dev/null
+                    strings "$ported_file" > "$TEMP_DIR/ported.strings" 2>/dev/null
+                    diff -u "$TEMP_DIR/stock.strings" "$TEMP_DIR/ported.strings" > "$patch_output_dir/$(basename "$relative_path").strings.patch" 2>/dev/null
+                    ;;
+                readelf)
+                    if [[ "$mime_type" == "application/x-elf" || "$mime_type" == "application/x-sharedlib" || "$mime_type" == "application/x-executable" ]]; then
+                        readelf -d "$stock_file" > "$TEMP_DIR/stock.elf" 2>/dev/null
+                        readelf -d "$ported_file" > "$TEMP_DIR/ported.elf" 2>/dev/null
+                        diff -u "$TEMP_DIR/stock.elf" "$TEMP_DIR/ported.elf" > "$patch_output_dir/$(basename "$relative_path").dependencies.patch" 2>/dev/null
+                    fi
+                    ;;
+            esac
+        done
+    fi
+}
+
+# Progress bar with proper error handling
+if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" && -s "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then
+    total_files=$(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt")
+    current_file=0
+
+    while IFS= read -r file; do
+        ((current_file++))
+        clean_file_path="${file#./}"
+        printf "\r -> Processing file %d of %d: %-60s" "$current_file" "$total_files" "$(basename "$clean_file_path")"
+        analyze_file "$clean_file_path" 2>/dev/null
+    done < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    echo # Print a newline to finish the progress bar line
+else
+    echo "No changed files found to analyze."
+fi
+
+# --- Phase 4: Final Report & Cleanup ---
+echo
+echo "--- Phase 4: Generating Final Report ---"
+
+# Detect the original user (the one who called sudo)
+ORIGINAL_USER="${SUDO_USER:-$(logname 2>/dev/null)}"
+if [[ -n "$ORIGINAL_USER" && "$ORIGINAL_USER" != "root" ]]; then
+    ORIGINAL_UID=$(id -u "$ORIGINAL_USER" 2>/dev/null)
+    ORIGINAL_GID=$(id -g "$ORIGINAL_USER" 2>/dev/null)
+    echo "Detected original user: $ORIGINAL_USER (UID: $ORIGINAL_UID, GID: $ORIGINAL_GID)"
+else
+    ORIGINAL_USER=""
+    echo "Warning: Could not detect original user. Output will remain owned by root."
+fi
+
+SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
+
+{
+    echo "======================================================="
+    echo " Forensic Analysis Report - Generated by The Detective"
+    echo "======================================================="
+    echo "Generated on: $(date)"
+    echo
+    echo "Ported ROM: $PORTED_ROM_PATH"
+    echo "Base ROM:   $BASE_ROM_PATH"
+    [[ "$ANALYSIS_MODE" == "TRIPLE" ]] && echo "Target ROM: $TARGET_STOCK_PATH"
+    echo "-------------------------------------------------------"
+    echo
+
+    if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+        echo "--- [TRANSPLANTED] Files from Target Stock ROM ---"
+        if [[ -f "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" ]]; then
+            cat "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
+        fi
+        echo
+    fi
+
+    echo "--- [CHANGED] Files (Content differs from Base ROM) ---"
+    if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then
+        cat "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    fi
+    echo
+
+    echo "--- [NEW] Files (Present in Ported, missing in Base) ---"
+    if [[ -f "$RAW_LISTS_DIR/03_NEW_FILES.txt" ]]; then
+        cat "$RAW_LISTS_DIR/03_NEW_FILES.txt"
+    fi
+    echo
+
+    echo "--- [DELETED] Files (Present in Base, missing in Ported) ---"
+    if [[ -f "$RAW_LISTS_DIR/01_DELETED_FILES.txt" ]]; then
+        cat "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
+    fi
+    echo
+    
+} > "$SUMMARY_FILE"
+
+if [[ "$CLEANUP_TEMP_FILES" == "true" ]]; then
+    echo "Cleaning up temporary files..."
+    rm -rf "$TEMP_DIR"
+fi
+
+# Change ownership of output directory to original user
+if [[ -n "$ORIGINAL_USER" && -n "$ORIGINAL_UID" && -n "$ORIGINAL_GID" ]]; then
+    echo "Changing ownership of output directory to $ORIGINAL_USER..."
+    chown -R "$ORIGINAL_UID:$ORIGINAL_GID" "$OUTPUT_DIR"
+    echo "Output directory ownership transferred successfully."
+fi
+
+echo
+echo -e "${BOLD}${GREEN}"
+echo "=========================================="
+echo "         ANALYSIS COMPLETE"
+echo "=========================================="
+echo -e "${RESET}"
+echo -e "All results have been saved to: ${BOLD}$OUTPUT_DIR${RESET}"
+if [[ -n "$ORIGINAL_USER" ]]; then
+    echo -e "Directory ownership: ${BOLD}$ORIGINAL_USER${RESET}"
+fi
+echo
