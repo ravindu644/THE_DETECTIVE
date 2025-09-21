@@ -57,6 +57,7 @@ check_and_install_deps() {
         ["util-linux"]="hexdump"
         ["file"]="file"
         ["gawk"]="awk"
+        ["unzip"]="unzip"
     )
     
     packages_to_install=()
@@ -156,6 +157,13 @@ BINARY_ANALYSIS_METHODS="hexdump strings readelf"
 # overriding the automatic detection. Useful for files like .rc or .bp
 # that might be misidentified as binary.
 FORCE_TEXT_EXTENSIONS="rc prop xml sh bp"
+
+# --- Archive Analysis ---
+# Enable/disable deep analysis of archive contents (.zip, .apex, etc.)
+ANALYZE_ARCHIVES="true"
+# Space-separated list of extensions to treat as archives.
+# NOTE: .apk and .jar are handled separately by the APKTOOL_COMMAND.
+ARCHIVE_EXTENSIONS="apex zip"
 
 # --- Signature Filtering ---
 # Enable filtering of files with only signature/metadata changes
@@ -478,15 +486,34 @@ analyze_file() {
         diff -urN "$stock_src" "$ported_src" > "$patch_output_dir/$(basename "$relative_path").patch" 2>/dev/null
         return
     fi
+
+    # 2. Archive Handler (e.g., .zip, .apex)
+    if [[ "$ANALYZE_ARCHIVES" == "true" ]]; then
+        for archive_ext in $ARCHIVE_EXTENSIONS; do
+            if [[ "$extension" == "$archive_ext" ]]; then
+                local stock_src="$TEMP_DIR/stock_archive_src"
+                local ported_src="$TEMP_DIR/ported_archive_src"
+                rm -rf "$stock_src" "$ported_src"
+
+                # Unzip both archives quietly
+                unzip -q -o "$stock_file" -d "$stock_src" &> /dev/null
+                unzip -q -o "$ported_file" -d "$ported_src" &> /dev/null
+
+                # Diff the extracted contents
+                diff -urN "$stock_src" "$ported_src" > "$patch_output_dir/$(basename "$relative_path").contents.patch" 2>/dev/null
+                return
+            fi
+        done
+    fi    
     
-    # 2. Skippable Binary Check
+    # 3. Skippable Binary Check
     for skip_ext in $SKIP_BINARY_ANALYSIS_EXTENSIONS; do
         if [[ "$extension" == "$skip_ext" ]]; then
             return
         fi
     done
 
-    # 3. Force Text Check (Whitelist)
+    # 4. Force Text Check (Whitelist)
     # This overrides automatic detection for specific file types.
     for force_text_ext in $FORCE_TEXT_EXTENSIONS; do
         if [[ "$extension" == "$force_text_ext" ]]; then
@@ -495,7 +522,7 @@ analyze_file() {
         fi
     done
     
-    # 3. Use 'file' command for robust file type detection
+    # 5. Use 'file' command for robust file type detection
     local mime_type
     mime_type=$(file -b --mime-type "$ported_file" 2>/dev/null || echo "unknown")
 
