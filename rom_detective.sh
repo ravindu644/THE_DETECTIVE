@@ -232,7 +232,7 @@ compare_hash_files() {
     local changed_output="$5"
     local unchanged_output="$6"
     
-    echo "Analyzing file differences using AWK-based comparison..."
+    echo "Analyzing file differences using AWK-based comparison..." >&2
     
     # Use a single AWK script to process both files and generate all outputs
     awk '
