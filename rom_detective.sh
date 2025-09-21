@@ -151,6 +151,12 @@ SKIP_BINARY_ANALYSIS_EXTENSIONS="png jpg mp3 ogg zip dat"
 # - readelf: Diffs library dependencies. Finds structural linking changes.
 BINARY_ANALYSIS_METHODS="hexdump strings readelf"
 
+# --- File Type Overrides ---
+# A space-separated list of extensions to ALWAYS treat as text files,
+# overriding the automatic detection. Useful for files like .rc or .bp
+# that might be misidentified as binary.
+FORCE_TEXT_EXTENSIONS="rc prop xml sh bp"
+
 # --- Signature Filtering ---
 # Enable filtering of files with only signature/metadata changes
 FILTER_SIGNATURE_ONLY_CHANGES="true"
@@ -476,6 +482,15 @@ analyze_file() {
     # 2. Skippable Binary Check
     for skip_ext in $SKIP_BINARY_ANALYSIS_EXTENSIONS; do
         if [[ "$extension" == "$skip_ext" ]]; then
+            return
+        fi
+    done
+
+    # 3. Force Text Check (Whitelist)
+    # This overrides automatic detection for specific file types.
+    for force_text_ext in $FORCE_TEXT_EXTENSIONS; do
+        if [[ "$extension" == "$force_text_ext" ]]; then
+            diff -u "$stock_file" "$ported_file" > "$patch_output_dir/$(basename "$relative_path").patch" 2>/dev/null
             return
         fi
     done
