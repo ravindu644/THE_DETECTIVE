@@ -2,18 +2,16 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.0 (REWRITTEN - PURE BASH APPROACH)
+# Version: 2.1 (SIGNATURE FILTERING)
 # Author: ravindu644
-# ==============================================================================
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# MAJOR REWRITE:
-# - Eliminated problematic comm/join commands
-# - Pure bash/awk approach for file comparison
-# - More reliable hash-based file comparison logic
-# - Better progress reporting and error handling
+# REWRITE NOTES (v2.0):
+# - Eliminated problematic comm/join commands for a pure bash/awk approach.
+# - More reliable hash-based file comparison logic.
+# - Better progress reporting and error handling.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -27,12 +25,12 @@ RESET="\033[0m"
 
 # Banner function
 print_banner() {
-  echo -e "${BOLD}${GREEN}"
-  echo "┌───────────────────────────────────────────┐"
-  echo "│     The Detective - ROM Analysis Tool     │"
-  echo "│              v2.0 - REWRITTEN             │"
-  echo "└───────────────────────────────────────────┘"
-  echo -e "${RESET}"
+    echo -e "${BOLD}${GREEN}"
+    echo "┌───────────────────────────────────────────┐"
+    echo "│     The Detective - ROM Analysis Tool     │"
+    echo "│         v2.1 - SIGNATURE FILTERING        │"
+    echo "└───────────────────────────────────────────┘"
+    echo -e "${RESET}"
 }
 
 # Function to check for root privileges
@@ -76,7 +74,6 @@ check_and_install_deps() {
     done
 
     if [ "$all_deps_met" = false ]; then
-        echo
         echo "Attempting to install missing system packages..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y
@@ -130,18 +127,100 @@ check_and_create_config() {
 # This file controls the behavior of the ROM analysis script.
 
 # --- General Settings ---
+
+# Set to "true" to automatically delete temporary folders (like decompiled APKs).
+# Set to "false" to keep them for manual inspection.
 CLEANUP_TEMP_FILES="true"
+
+# Command for decompiling APKs/JARs.
 APKTOOL_COMMAND="apktool"
+
+# List of directories and files to completely ignore during the comparison.
+# Use spaces to separate multiple entries. (e.g., IGNORE_LIST=".git .DS_Store")
 IGNORE_LIST=".repack_info"
 
 # --- Binary File Analysis ---
+
+# Space-separated list of file extensions to IGNORE during binary analysis.
+# These files will be listed as "changed" but no patch will be generated.
 SKIP_BINARY_ANALYSIS_EXTENSIONS="png jpg mp3 ogg zip dat"
+
+# The analysis methods to run on all other binary files.
+# - hexdump: Full hexadecimal diff. Very thorough.
+# - strings: Diffs human-readable text. Great for finding config changes.
+# - readelf: Diffs library dependencies. Finds structural linking changes.
 BINARY_ANALYSIS_METHODS="hexdump strings readelf"
+
+# --- Signature Filtering ---
+# Enable filtering of files with only signature/metadata changes
+FILTER_SIGNATURE_ONLY_CHANGES="true"
+# Patterns to ignore (one per line, supports basic regex)
+# Useful to ignore files with no changes, but only the watermak of a developer
+IGNORE_SIGNATURE_PATTERNS="lj4nt8
+build_id_[0-9]+
+__build__
+_CI_BUILD_
+_metadata_"
 EOF
-        echo
         echo "Configuration has been created."
         read -p "Please review/edit '$CONFIG_FILE' to your liking now, then press [Enter] to begin the analysis."
     fi
+}
+
+# Function to check if a file has only signature changes
+check_signature_only_changes() {
+    local file_path="$1"
+    local base_file="$BASE_ROM_PATH/$file_path"
+    local ported_file="$PORTED_ROM_PATH/$file_path"
+    
+    # Only process if signature filtering is enabled
+    if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" != "true" ]]; then
+        return 1  # Not signature-only, continue normal processing
+    fi
+    
+    # Skip if either file doesn't exist
+    if [[ ! -f "$base_file" || ! -f "$ported_file" ]]; then
+        return 1
+    fi
+    
+    # Get file sizes
+    local base_size=$(wc -c < "$base_file" 2>/dev/null || echo 0)
+    local ported_size=$(wc -c < "$ported_file" 2>/dev/null || echo 0)
+    
+    # If ported is smaller than base, definitely not signature-only addition
+    if [[ $ported_size -le $base_size ]]; then
+        return 1
+    fi
+    
+    # Calculate size difference
+    local size_diff=$((ported_size - base_size))
+    
+    # If difference is too large, unlikely to be just signature
+    if [[ $size_diff -gt 100 ]]; then
+        return 1
+    fi
+    
+    # Extract the potential signature (last N bytes of ported file)
+    local signature_candidate
+    signature_candidate=$(tail -c "$size_diff" "$ported_file" 2>/dev/null | tr -d '\0\n\r' | strings -a | head -1)
+    
+    # Check if this signature matches any ignore patterns
+    if [[ -n "$signature_candidate" ]]; then
+        while IFS= read -r pattern; do
+            # Skip empty lines and comments
+            [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
+            
+            # Check if signature matches pattern (basic regex support)
+            if echo "$signature_candidate" | grep -qE "$pattern"; then
+                # Verify the base file + signature = ported file
+                if head -c "$base_size" "$ported_file" | cmp -s - "$base_file"; then
+                    return 0  # This is signature-only
+                fi
+            fi
+        done <<< "$IGNORE_SIGNATURE_PATTERNS"
+    fi
+    
+    return 1  # Not signature-only
 }
 
 # New function to compare files using pure awk
@@ -151,6 +230,8 @@ compare_hash_files() {
     local deleted_output="$3"
     local new_output="$4"
     local changed_output="$5"
+    local unchanged_output="$6"
+    local signature_only_output="$7"
     
     echo "Analyzing file differences using AWK-based comparison..."
     
@@ -177,6 +258,8 @@ compare_hash_files() {
             # File exists in both - check if changed
             if (base_files[filepath] != ported_hash) {
                 print filepath > changed_file
+            } else {
+                print filepath > unchanged_file
             }
             # Mark as processed
             delete base_files[filepath]
@@ -195,144 +278,177 @@ compare_hash_files() {
         
         printf "Processed %d base files and %d ported files\n", base_count, ported_count > "/dev/stderr"
     }
-    ' changed_file="$changed_output" deleted_file="$deleted_output" new_file="$new_output" \
+    ' changed_file="$changed_output" deleted_file="$deleted_output" new_file="$new_output" unchanged_file="$unchanged_output" \
       "$base_hashes" "$ported_hashes"
-}
-
-# --- Main Script Execution ---
-
-# Print the banner first
-print_banner
-
-# Initial checks
-check_root
-check_and_install_deps
-check_and_install_apktool
-check_and_create_config
-
-# Load the configuration file
-source "./$CONFIG_FILE"
-
-# --- Phase 1: Initialization ---
-echo
-# Get user input for directories
-read -e -p "[1/3] Enter the path to the Ported/Modified ROM directory: " PORTED_ROM_PATH
-# Sanitize input: remove leading/trailing single or double quotes
-PORTED_ROM_PATH="${PORTED_ROM_PATH%\'}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\'}"
-PORTED_ROM_PATH="${PORTED_ROM_PATH%\"}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\"}"
-if [[ ! -d "$PORTED_ROM_PATH" ]]; then echo "Error: Path not found for Ported ROM -> '$PORTED_ROM_PATH'"; exit 1; fi
-
-read -e -p "[2/3] Enter the path to the original Base ROM directory: " BASE_ROM_PATH
-# Sanitize input
-BASE_ROM_PATH="${BASE_ROM_PATH%\'}"; BASE_ROM_PATH="${BASE_ROM_PATH#\'}"
-BASE_ROM_PATH="${BASE_ROM_PATH%\"}"; BASE_ROM_PATH="${BASE_ROM_PATH#\"}"
-if [[ ! -d "$BASE_ROM_PATH" ]]; then echo "Error: Path not found for Base ROM -> '$BASE_ROM_PATH'"; exit 1; fi
-
-read -e -p "[3/3] OPTIONAL: Enter path to the Target Device's Stock ROM [Press Enter to skip]: " TARGET_STOCK_PATH
-# Sanitize input
-if [[ -n "$TARGET_STOCK_PATH" ]]; then
-    TARGET_STOCK_PATH="${TARGET_STOCK_PATH%\'}"; TARGET_STOCK_PATH="${TARGET_STOCK_PATH#\'}"
-    TARGET_STOCK_PATH="${TARGET_STOCK_PATH%\"}"; TARGET_STOCK_PATH="${TARGET_STOCK_PATH#\"}"
-fi
-
-# Determine mode and validate third path if provided
-ANALYSIS_MODE="DUAL"
-if [[ -n "$TARGET_STOCK_PATH" ]]; then
-    if [[ ! -d "$TARGET_STOCK_PATH" ]]; then
-        echo "Error: Target Stock ROM path not found -> '$TARGET_STOCK_PATH'"
-        exit 1
-    fi
-    ANALYSIS_MODE="TRIPLE"
-    echo "Mode: Triple-Compare"
-else
-    echo "Mode: Dual-Compare"
-fi
-
-# Setup output environment
-TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-SCRIPT_DIR=$(pwd) # Get the absolute path of the script's execution directory
-OUTPUT_DIR="$SCRIPT_DIR/final_detective_folder_$TIMESTAMP"
-PATCHES_DIR="$OUTPUT_DIR/patches"
-RAW_LISTS_DIR="$OUTPUT_DIR/raw_file_lists"
-TEMP_DIR="$OUTPUT_DIR/temp"
-
-mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
-echo "Results will be saved in: $OUTPUT_DIR"
-
-# --- Phase 2: Hash Generation and Comparison ---
-echo
-echo "--- Phase 2: Generating File Hashes (This may take a while...) ---"
-
-# Create ignore options for the find command
-ignore_opts=()
-for item in $IGNORE_LIST; do
-    ignore_opts+=(-not -path "*/$item/*")
-done
-
-# Hash generation function
-hash_directory() {
-    local dir_path="$1"
-    local output_file="$2"
-    local dir_name="$3"
-    echo "Hashing $dir_name directory..."
-    (cd "$dir_path" && find . -type f "${ignore_opts[@]}" -exec sha256sum {} + > "$output_file")
-}
-
-# Hash all provided directories
-hash_directory "$PORTED_ROM_PATH" "$TEMP_DIR/ported.hashes" "Ported ROM"
-hash_directory "$BASE_ROM_PATH" "$TEMP_DIR/base.hashes" "Base ROM"
-if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
-    hash_directory "$TARGET_STOCK_PATH" "$TEMP_DIR/target.hashes" "Target Stock ROM"
-fi
-
-echo "Hash generation complete. Comparing files..."
-
-# Use the new AWK-based comparison method
-compare_hash_files \
-    "$TEMP_DIR/base.hashes" \
-    "$TEMP_DIR/ported.hashes" \
-    "$RAW_LISTS_DIR/01_DELETED_FILES.txt" \
-    "$RAW_LISTS_DIR/03_NEW_FILES.txt" \
-    "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
-
-# Handle triple-compare mode for transplanted files
-if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
-    echo "Performing Triple-Compare analysis..."
     
-    # Find files that are identical between ported and target (transplanted)
-    awk '
-    FNR==NR {
-        # Store ported ROM hashes
-        ported_files[$2] = $1
-        next
-    }
-    {
-        # Check target ROM hashes
-        filepath = $2
-        target_hash = $1
+    # Post-process changed files for signature filtering
+    if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -f "$changed_output" ]]; then
+        echo -e "\nFiltering signature-only changes..." >&2
         
-        if (filepath in ported_files && ported_files[filepath] == target_hash) {
-            print filepath
-        }
-    }
-    ' "$TEMP_DIR/ported.hashes" "$TEMP_DIR/target.hashes" > "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
-fi
+        local temp_changed="$TEMP_DIR/filtered_changed.tmp"
+        local temp_signature_only="$TEMP_DIR/signature_only.tmp"
+        
+        > "$temp_changed"
+        > "$temp_signature_only"
+        
+        local total_changed=$(wc -l < "$changed_output")
+        local current=0
+        
+        while IFS= read -r filepath; do
+            ((current++))
+            printf "\r -> Filtering file %d of %d: %-50s" "$current" "$total_changed" "$(basename "$filepath")" >&2
+            
+            if check_signature_only_changes "$filepath"; then
+                echo "$filepath" >> "$temp_signature_only"
+            else
+                echo "$filepath" >> "$temp_changed"
+            fi
+        done < "$changed_output"
+        echo >&2
+        
+        # Replace the changed file list with filtered results
+        mv "$temp_changed" "$changed_output"
+        if [[ -n "$signature_only_output" ]]; then
+            mv "$temp_signature_only" "$signature_only_output"
+        fi
+        
+        local signature_count=$(wc -l < "$signature_only_output" 2>/dev/null || echo 0)
+        local real_changed_count=$(wc -l < "$changed_output" 2>/dev/null || echo 0)
+        
+        echo -e "\n${BOLD}Filtered out $signature_count signature-only changes, $real_changed_count real changes remain${RESET}" >&2
+    fi
+}
 
-echo "File comparison complete."
-
-# Print summary of findings
-echo
-echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
-echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
-echo "New files: $(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)"
-echo "Deleted files: $(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)"
-if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
-    echo "Transplanted files: $(wc -l < "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" 2>/dev/null || echo 0)"
-fi
-
-# --- Phase 3: Deep Analysis ---
-echo
-echo "--- Phase 3: Performing Deep Analysis on Changed Files ---"
+# New function to analyze modification patterns and generate an intelligence report
+analyze_modification_patterns() {
+    local changed_files="$1"
+    local patches_dir="$2"
+    local output_file="$3"
+    
+    echo "Analyzing modification patterns..."
+    
+    local temp_analysis="$TEMP_DIR/pattern_analysis.tmp"
+    local temp_dirs="$TEMP_DIR/directory_analysis.tmp"
+    local temp_types="$TEMP_DIR/filetype_analysis.tmp"
+    
+    if [[ -f "$changed_files" && -s "$changed_files" ]]; then
+        while IFS= read -r filepath; do
+            extension="${filepath##*.}"
+            if [[ "$extension" == "$filepath" ]]; then
+                extension="(no_extension)"
+            fi
+            echo "$extension" >> "$temp_types"
+            
+            directory=$(dirname "$filepath")
+            echo "$directory" >> "$temp_dirs"
+            
+            patch_file="$patches_dir/$filepath.patch"
+            hexdump_patch="$patches_dir/$filepath.hexdump.patch"
+            strings_patch="$patches_dir/$filepath.strings.patch"
+            
+            patch_size=0
+            if [[ -f "$patch_file" ]]; then
+                patch_size=$(wc -l < "$patch_file" 2>/dev/null || echo 0)
+            elif [[ -f "$hexdump_patch" ]]; then
+                patch_size=$(wc -l < "$hexdump_patch" 2>/dev/null || echo 0)
+            elif [[ -f "$strings_patch" ]]; then
+                patch_size=$(wc -l < "$strings_patch" 2>/dev/null || echo 0)
+            fi
+            
+            echo "$filepath:$patch_size" >> "$temp_analysis"
+            
+        done < "$changed_files"
+    fi
+    
+    {
+        echo "================================================================"
+        echo " PORTING INTELLIGENCE REPORT - Modification Patterns Analysis"
+        echo "================================================================"
+        echo "Generated on: $(date)"
+        echo
+        
+        total_changed=$(wc -l < "$changed_files" 2>/dev/null || echo 0)
+        total_new=$(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)
+        total_deleted=$(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)
+        total_unchanged=$(wc -l < "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" 2>/dev/null || echo 0)
+        total_signature_only=$(wc -l < "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" 2>/dev/null || echo 0)
+        total_files=$((total_changed + total_unchanged))
+        
+        if [[ $total_files -gt 0 ]]; then
+            change_percentage=$(( (total_changed * 100) / total_files ))
+        else
+            change_percentage=0
+        fi
+        
+        echo "=== OVERALL MODIFICATION STATISTICS ==="
+        echo "Total files analyzed: $total_files"
+        echo "Files with real changes: $total_changed ($change_percentage%)"
+        if [[ $total_signature_only -gt 0 ]]; then
+            echo "Files with signature-only changes: $total_signature_only (filtered out)"
+        fi
+        echo "Files added: $total_new"
+        echo "Files deleted: $total_deleted"
+        echo "Files unchanged: $total_unchanged"
+        echo
+        
+        echo "=== FILE TYPE DISTRIBUTION (Real Changes Only) ==="
+        if [[ -f "$temp_types" ]]; then
+            sort "$temp_types" | uniq -c | sort -nr | head -10 | while read count ext; do
+                printf "%-15s: %d files\n" "$ext" "$count"
+            done
+        else
+            echo "No file type data available"
+        fi
+        echo
+        
+        echo "=== DIRECTORY HOTSPOTS (Most Modified) ==="
+        if [[ -f "$temp_dirs" ]]; then
+            sort "$temp_dirs" | uniq -c | sort -nr | head -15 | while read count dir; do
+                printf "%-40s: %d changes\n" "$dir" "$count"
+            done
+        else
+            echo "No directory data available"
+        fi
+        echo
+        
+        echo "=== CHANGE INTENSITY ANALYSIS ==="
+        if [[ -f "$temp_analysis" ]]; then
+            small_changes=0
+            medium_changes=0
+            large_changes=0
+            
+            while IFS=':' read -r filepath patch_size; do
+                if [[ $patch_size -eq 0 ]]; then
+                    continue
+                elif [[ $patch_size -le 20 ]]; then
+                    ((small_changes++))
+                elif [[ $patch_size -le 100 ]]; then
+                    ((medium_changes++))
+                else
+                    ((large_changes++))
+                fi
+            done < "$temp_analysis"
+            
+            echo "Small changes (1-20 lines): $small_changes files"
+            echo "Medium changes (21-100 lines): $medium_changes files"  
+            echo "Large changes (100+ lines): $large_changes files"
+            echo
+            
+            echo "=== MOST HEAVILY MODIFIED FILES ==="
+            sort -t':' -k2 -nr "$temp_analysis" | head -10 | while IFS=':' read -r filepath patch_size; do
+                if [[ $patch_size -gt 0 ]]; then
+                    printf "%-50s: %d lines changed\n" "$(basename "$filepath")" "$patch_size"
+                fi
+            done
+        else
+            echo "No change intensity data available"
+        fi
+        echo
+        
+    } > "$output_file"
+    
+    rm -f "$temp_analysis" "$temp_dirs" "$temp_types"
+}
 
 # File classification and analysis function
 analyze_file() {
@@ -400,6 +516,140 @@ analyze_file() {
     fi
 }
 
+# --- Main Script Execution ---
+
+print_banner
+check_root
+check_and_install_deps
+check_and_install_apktool
+check_and_create_config
+
+source "./$CONFIG_FILE"
+
+# --- Phase 1: Initialization ---
+echo
+# Get user input for directories
+read -e -p "[1/3] Enter the path to the Ported/Modified ROM directory: " PORTED_ROM_PATH
+PORTED_ROM_PATH="${PORTED_ROM_PATH%\'}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\'}"
+PORTED_ROM_PATH="${PORTED_ROM_PATH%\"}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\"}"
+if [[ ! -d "$PORTED_ROM_PATH" ]]; then echo "Error: Path not found for Ported ROM -> '$PORTED_ROM_PATH'"; exit 1; fi
+
+read -e -p "[2/3] Enter the path to the original Base ROM directory: " BASE_ROM_PATH
+BASE_ROM_PATH="${BASE_ROM_PATH%\'}"; BASE_ROM_PATH="${BASE_ROM_PATH#\'}"
+BASE_ROM_PATH="${BASE_ROM_PATH%\"}"; BASE_ROM_PATH="${BASE_ROM_PATH#\"}"
+if [[ ! -d "$BASE_ROM_PATH" ]]; then echo "Error: Path not found for Base ROM -> '$BASE_ROM_PATH'"; exit 1; fi
+
+read -e -p "[3/3] OPTIONAL: Enter path to the Target Device's Stock ROM [Press Enter to skip]: " TARGET_STOCK_PATH
+if [[ -n "$TARGET_STOCK_PATH" ]]; then
+    TARGET_STOCK_PATH="${TARGET_STOCK_PATH%\'}"; TARGET_STOCK_PATH="${TARGET_STOCK_PATH#\'}"
+    TARGET_STOCK_PATH="${TARGET_STOCK_PATH%\"}"; TARGET_STOCK_PATH="${TARGET_STOCK_PATH#\"}"
+fi
+
+# Determine mode and validate third path if provided
+ANALYSIS_MODE="DUAL"
+if [[ -n "$TARGET_STOCK_PATH" ]]; then
+    if [[ ! -d "$TARGET_STOCK_PATH" ]]; then
+        echo "Error: Target Stock ROM path not found -> '$TARGET_STOCK_PATH'"
+        exit 1
+    fi
+    ANALYSIS_MODE="TRIPLE"
+    echo -e "\nMode: Triple-Compare"
+else
+    echo -e "\nMode: Dual-Compare"
+fi
+
+# Setup output environment
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+SCRIPT_DIR=$(pwd)
+OUTPUT_DIR="$SCRIPT_DIR/final_detective_folder_$TIMESTAMP"
+PATCHES_DIR="$OUTPUT_DIR/patches"
+RAW_LISTS_DIR="$OUTPUT_DIR/raw_file_lists"
+TEMP_DIR="$OUTPUT_DIR/temp"
+
+mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
+echo "Results will be saved in: $OUTPUT_DIR"
+
+# --- Phase 2: Hash Generation and Comparison ---
+echo
+echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
+
+# Create ignore options for the find command
+ignore_opts=()
+for item in $IGNORE_LIST; do
+    ignore_opts+=(-not -path "*/$item/*")
+done
+
+# Hash generation function
+hash_directory() {
+    local dir_path="$1"
+    local output_file="$2"
+    local dir_name="$3"
+    echo "Hashing $dir_name directory..."
+    (cd "$dir_path" && find . -type f "${ignore_opts[@]}" -exec sha256sum {} + > "$output_file")
+}
+
+# Hash all provided directories
+hash_directory "$PORTED_ROM_PATH" "$TEMP_DIR/ported.hashes" "Ported ROM"
+hash_directory "$BASE_ROM_PATH" "$TEMP_DIR/base.hashes" "Base ROM"
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    hash_directory "$TARGET_STOCK_PATH" "$TEMP_DIR/target.hashes" "Target Stock ROM"
+fi
+
+echo -e "Hash generation complete. Comparing files...\n"
+
+# Use the new AWK-based comparison method
+compare_hash_files \
+    "$TEMP_DIR/base.hashes" \
+    "$TEMP_DIR/ported.hashes" \
+    "$RAW_LISTS_DIR/01_DELETED_FILES.txt" \
+    "$RAW_LISTS_DIR/03_NEW_FILES.txt" \
+    "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" \
+    "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" \
+    "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt"
+
+# Handle triple-compare mode for transplanted files
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    echo -e "\nPerforming Triple-Compare analysis..."
+    
+    # Find files that are identical between ported and target (transplanted)
+    awk '
+    FNR==NR {
+        # Store ported ROM hashes
+        ported_files[$2] = $1
+        next
+    }
+    {
+        # Check target ROM hashes
+        filepath = $2
+        target_hash = $1
+        
+        if (filepath in ported_files && ported_files[filepath] == target_hash) {
+            print filepath
+        }
+    }
+    ' "$TEMP_DIR/ported.hashes" "$TEMP_DIR/target.hashes" > "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
+fi
+
+echo "File comparison complete."
+
+# Print summary of findings
+echo
+echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
+echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
+if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" ]]; then
+    echo -e "${BOLD}Ignored Watermarked files:${RESET} $(wc -l < "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" 2>/dev/null || echo 0)"
+fi
+echo "New files: $(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)"
+echo "Deleted files: $(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)"
+echo "Unchanged files: $(wc -l < "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" 2>/dev/null || echo 0)"
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    echo "Transplanted files: $(wc -l < "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" 2>/dev/null || echo 0)"
+fi
+
+# --- Phase 3: Deep Analysis ---
+echo
+echo "--- Phase 3: Performing Deep Analysis on Changed Files ---"
+
 # Progress bar with proper error handling
 if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" && -s "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then
     total_files=$(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt")
@@ -411,10 +661,13 @@ if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" && -s "$RAW_LISTS_DIR/02_CHANGED_
         printf "\r -> Processing file %d of %d: %-60s" "$current_file" "$total_files" "$(basename "$clean_file_path")"
         analyze_file "$clean_file_path" 2>/dev/null
     done < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
-    echo # Print a newline to finish the progress bar line
+    echo
 else
     echo "No changed files found to analyze."
 fi
+
+echo "Generating modification patterns analysis..."
+analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$PATCHES_DIR" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
 
 # --- Phase 4: Final Report & Cleanup ---
 echo
@@ -450,6 +703,18 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
         if [[ -f "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" ]]; then
             cat "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
         fi
+        echo
+    fi
+
+    echo "--- [UNCHANGED] Files (Identical in both ROMs) ---"
+    if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
+        cat "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
+    fi
+    echo
+
+    if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -f "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" && -s "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" ]]; then
+        echo "--- [SIGNATURE-ONLY] Files (Only metadata/signature differences) ---"
+        cat "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt"
         echo
     fi
 
