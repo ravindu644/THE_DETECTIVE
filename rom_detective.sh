@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.1 (SIGNATURE FILTERING)
+# Version: 2.2 (SIMPLIFIED OUTPUT)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
@@ -28,7 +28,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│         v2.1 - SIGNATURE FILTERING        │"
+    echo "│         v2.2 - SIMPLIFIED OUTPUT          │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -231,7 +231,6 @@ compare_hash_files() {
     local new_output="$4"
     local changed_output="$5"
     local unchanged_output="$6"
-    local signature_only_output="$7"
     
     echo "Analyzing file differences using AWK-based comparison..."
     
@@ -308,14 +307,16 @@ compare_hash_files() {
         
         # Replace the changed file list with filtered results
         mv "$temp_changed" "$changed_output"
-        if [[ -n "$signature_only_output" ]]; then
-            mv "$temp_signature_only" "$signature_only_output"
-        fi
-        
-        local signature_count=$(wc -l < "$signature_only_output" 2>/dev/null || echo 0)
+        local signature_count=$(wc -l < "$temp_signature_only" 2>/dev/null || echo 0)
         local real_changed_count=$(wc -l < "$changed_output" 2>/dev/null || echo 0)
-        
+
+        # Append signature-only files to the main unchanged list
+        if [[ $signature_count -gt 0 ]]; then
+            cat "$temp_signature_only" >> "$unchanged_output"
+        fi
+
         echo -e "\n${BOLD}Filtered out $signature_count signature-only changes, $real_changed_count real changes remain${RESET}" >&2
+        echo "$signature_count" # Output the count for the main script
     fi
 }
 
@@ -371,7 +372,6 @@ analyze_modification_patterns() {
         total_new=$(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)
         total_deleted=$(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)
         total_unchanged=$(wc -l < "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" 2>/dev/null || echo 0)
-        total_signature_only=$(wc -l < "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" 2>/dev/null || echo 0)
         total_files=$((total_changed + total_unchanged))
         
         if [[ $total_files -gt 0 ]]; then
@@ -383,12 +383,9 @@ analyze_modification_patterns() {
         echo "=== OVERALL MODIFICATION STATISTICS ==="
         echo "Total files analyzed: $total_files"
         echo "Files with real changes: $total_changed ($change_percentage%)"
-        if [[ $total_signature_only -gt 0 ]]; then
-            echo "Files with signature-only changes: $total_signature_only (filtered out)"
-        fi
         echo "Files added: $total_new"
         echo "Files deleted: $total_deleted"
-        echo "Files unchanged: $total_unchanged"
+        echo "Files unchanged: $total_unchanged (includes functionally identical watermarked files)"
         echo
         
         echo "=== FILE TYPE DISTRIBUTION (Real Changes Only) ==="
@@ -597,15 +594,15 @@ fi
 
 echo -e "Hash generation complete. Comparing files...\n"
 
-# Use the new AWK-based comparison method
-compare_hash_files \
+# Capture the count of filtered files from the function's output
+SIGNATURE_COUNT=$(compare_hash_files \
     "$TEMP_DIR/base.hashes" \
     "$TEMP_DIR/ported.hashes" \
     "$RAW_LISTS_DIR/01_DELETED_FILES.txt" \
     "$RAW_LISTS_DIR/03_NEW_FILES.txt" \
     "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" \
-    "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" \
-    "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt"
+    "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
+)
 
 # Handle triple-compare mode for transplanted files
 if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
@@ -636,8 +633,8 @@ echo "File comparison complete."
 echo
 echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
 echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
-if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" ]]; then
-    echo -e "${BOLD}Ignored Watermarked files:${RESET} $(wc -l < "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" 2>/dev/null || echo 0)"
+if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -n "$SIGNATURE_COUNT" && "$SIGNATURE_COUNT" -gt 0 ]]; then
+    echo -e "${BOLD}Ignored Watermarked files:${RESET} $SIGNATURE_COUNT (moved to unchanged list)"
 fi
 echo "New files: $(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)"
 echo "Deleted files: $(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)"
@@ -706,17 +703,11 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
         echo
     fi
 
-    echo "--- [UNCHANGED] Files (Identical in both ROMs) ---"
+    echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
     if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
         cat "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
     fi
     echo
-
-    if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -f "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" && -s "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt" ]]; then
-        echo "--- [SIGNATURE-ONLY] Files (Only metadata/signature differences) ---"
-        cat "$RAW_LISTS_DIR/06_SIGNATURE_ONLY_CHANGES.txt"
-        echo
-    fi
 
     echo "--- [CHANGED] Files (Content differs from Base ROM) ---"
     if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then
