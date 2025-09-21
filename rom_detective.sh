@@ -536,18 +536,24 @@ analyze_file() {
                 hexdump)
                     hexdump -C "$stock_file" > "$TEMP_DIR/stock.hex" 2>/dev/null
                     hexdump -C "$ported_file" > "$TEMP_DIR/ported.hex" 2>/dev/null
-                    diff -u "$TEMP_DIR/stock.hex" "$TEMP_DIR/ported.hex" > "$patch_output_dir/$(basename "$relative_path").hexdump.patch" 2>/dev/null
+                    diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.hex" "$TEMP_DIR/ported.hex" > "$patch_output_dir/$(basename "$relative_path").hexdump.patch" 2>/dev/null
+
+
                     ;;
                 strings)
                     strings "$stock_file" > "$TEMP_DIR/stock.strings" 2>/dev/null
                     strings "$ported_file" > "$TEMP_DIR/ported.strings" 2>/dev/null
-                    diff -u "$TEMP_DIR/stock.strings" "$TEMP_DIR/ported.strings" > "$patch_output_dir/$(basename "$relative_path").strings.patch" 2>/dev/null
+                    diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.strings" "$TEMP_DIR/ported.strings" > "$patch_output_dir/$(basename "$relative_path").strings.patch" 2>/dev/null
+                    diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.elf" "$TEMP_DIR/ported.elf" > "$patch_output_dir/$(basename "$relative_path").dependencies.patch" 2>/dev/null
+
+
                     ;;
                 readelf)
                     if [[ "$mime_type" == "application/x-elf" || "$mime_type" == "application/x-sharedlib" || "$mime_type" == "application/x-executable" ]]; then
                         readelf -d "$stock_file" > "$TEMP_DIR/stock.elf" 2>/dev/null
                         readelf -d "$ported_file" > "$TEMP_DIR/ported.elf" 2>/dev/null
-                        diff -u "$TEMP_DIR/stock.elf" "$TEMP_DIR/ported.elf" > "$patch_output_dir/$(basename "$relative_path").dependencies.patch" 2>/dev/null
+
+
                     fi
                     ;;
             esac
