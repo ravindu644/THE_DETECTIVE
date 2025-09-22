@@ -44,7 +44,7 @@ check_root() {
 
 # Function to check for and install required packages
 check_and_install_deps() {
-    echo "--- Phase 0: Verifying Dependencies ---"
+    echo -e "--- Phase 0: Verifying Dependencies ---\n"
     
     declare -A deps=(
         ["diffutils"]="diff"
@@ -83,7 +83,6 @@ check_and_install_deps() {
     else
         echo "All system dependencies are met."
     fi
-    echo
 }
 
 # Function to check for and install Apktool
@@ -572,7 +571,7 @@ check_and_create_config
 source "./$CONFIG_FILE"
 
 # --- Phase 1: Initialization ---
-echo
+echo -e "--- Phase 1: Initialization ---\n"
 # Get user input for directories
 read -e -p "[1/3] Enter the path to the Ported/Modified ROM directory: " PORTED_ROM_PATH
 PORTED_ROM_PATH="${PORTED_ROM_PATH%\'}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\'}"
