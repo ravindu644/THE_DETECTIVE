@@ -538,13 +538,9 @@ generate_deep_dive_report() {
                 continue
             fi
 
-            # Generate flexible table using a more robust approach
+            # Generate flexible table using dynamic column widths
             awk '
             BEGIN {
-                # Column widths
-                COL_WIDTH = 35
-                SEPARATOR_WIDTH = COL_WIDTH * 5 + 16  # 5 columns + separators
-                
                 # Load all data and count non-empty entries
                 while ((getline line < ARGV[1]) > 0) if (line) { replaced[++r_count] = basename(line) }
                 while ((getline line < ARGV[2]) > 0) if (line) { added_stock[++as_count] = basename(line) }
@@ -564,29 +560,59 @@ generate_deep_dive_report() {
                     print "No changes detected."
                     exit
                 }
+                
+                # Calculate dynamic column widths based on content
+                col1_width = length("[REPLACED] w/ Stock")
+                col2_width = length("[ADDED] from Stock")
+                col3_width = length("[CHANGED] by Porter")
+                col4_width = length("[NEW] Files")
+                col5_width = length("[DELETED] Files")
+                
+                for (i = 1; i <= r_count; i++) if (length(replaced[i]) > col1_width) col1_width = length(replaced[i])
+                for (i = 1; i <= as_count; i++) if (length(added_stock[i]) > col2_width) col2_width = length(added_stock[i])
+                for (i = 1; i <= c_count; i++) if (length(changed[i]) > col3_width) col3_width = length(changed[i])
+                for (i = 1; i <= nf_count; i++) if (length(new_files[i]) > col4_width) col4_width = length(new_files[i])
+                for (i = 1; i <= d_count; i++) if (length(deleted[i]) > col5_width) col5_width = length(deleted[i])
+                
+                # Cap maximum column width to prevent overly wide tables
+                max_col_width = 50
+                if (col1_width > max_col_width) col1_width = max_col_width
+                if (col2_width > max_col_width) col2_width = max_col_width
+                if (col3_width > max_col_width) col3_width = max_col_width
+                if (col4_width > max_col_width) col4_width = max_col_width
+                if (col5_width > max_col_width) col5_width = max_col_width
+                
+                # Ensure minimum width
+                if (col1_width < 20) col1_width = 20
+                if (col2_width < 20) col2_width = 20
+                if (col3_width < 20) col3_width = 20
+                if (col4_width < 15) col4_width = 15
+                if (col5_width < 15) col5_width = 15
+                
+                separator_width = col1_width + col2_width + col3_width + col4_width + col5_width + 16
             }
             END {
                 # Print header
                 printf "\n"
                 printf "%-*s | %-*s | %-*s | %-*s | %-*s\n", 
-                    COL_WIDTH, "[REPLACED] w/ Stock", 
-                    COL_WIDTH, "[ADDED] from Stock", 
-                    COL_WIDTH, "[CHANGED] by Porter", 
-                    COL_WIDTH, "[NEW] Files", 
-                    COL_WIDTH, "[DELETED] Files"
+                    col1_width, "[REPLACED] w/ Stock", 
+                    col2_width, "[ADDED] from Stock", 
+                    col3_width, "[CHANGED] by Porter", 
+                    col4_width, "[NEW] Files", 
+                    col5_width, "[DELETED] Files"
                 
                 # Print separator
-                for (i = 0; i < SEPARATOR_WIDTH; i++) printf "-"
+                for (i = 0; i < separator_width; i++) printf "-"
                 printf "\n"
                 
                 # Print data rows (only up to max_rows, no empty rows)
                 for (i = 1; i <= max_rows; i++) {
                     printf "%-*s | %-*s | %-*s | %-*s | %-*s\n",
-                        COL_WIDTH, (i <= r_count ? replaced[i] : ""),
-                        COL_WIDTH, (i <= as_count ? added_stock[i] : ""),
-                        COL_WIDTH, (i <= c_count ? changed[i] : ""),
-                        COL_WIDTH, (i <= nf_count ? new_files[i] : ""),
-                        COL_WIDTH, (i <= d_count ? deleted[i] : "")
+                        col1_width, (i <= r_count ? truncate_if_needed(replaced[i], col1_width) : ""),
+                        col2_width, (i <= as_count ? truncate_if_needed(added_stock[i], col2_width) : ""),
+                        col3_width, (i <= c_count ? truncate_if_needed(changed[i], col3_width) : ""),
+                        col4_width, (i <= nf_count ? truncate_if_needed(new_files[i], col4_width) : ""),
+                        col5_width, (i <= d_count ? truncate_if_needed(deleted[i], col5_width) : "")
                 }
                 printf "\n"
                 
@@ -598,11 +624,14 @@ generate_deep_dive_report() {
             function basename(path) {
                 # Extract filename from full path
                 gsub(/.*\//, "", path)
-                # Truncate if too long
-                if (length(path) > COL_WIDTH - 2) {
-                    path = substr(path, 1, COL_WIDTH - 5) "..."
-                }
                 return path
+            }
+            
+            function truncate_if_needed(text, width) {
+                if (length(text) > width) {
+                    return substr(text, 1, width - 3) "..."
+                }
+                return text
             }
             ' "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
             
@@ -611,7 +640,6 @@ generate_deep_dive_report() {
         done
     } > "$output_file"
 }
-
 
 # File classification and analysis function
 analyze_file() {
