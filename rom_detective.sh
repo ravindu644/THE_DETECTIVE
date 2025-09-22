@@ -512,6 +512,7 @@ analyze_modification_patterns() {
         total_new=$(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)
         total_deleted=$(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)
         total_unchanged=$(wc -l < "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" 2>/dev/null || echo 0)
+        total_replaced_with_stock=$(wc -l < "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" 2>/dev/null || echo 0)
         total_files=$((total_changed + total_unchanged))
         
         if [[ $total_files -gt 0 ]]; then
@@ -524,6 +525,11 @@ analyze_modification_patterns() {
         echo "Total files analyzed: $total_files"
         echo "Files with real changes: $total_changed ($change_percentage%)"
         echo "Files added: $total_new"
+
+        if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+            echo "Replaced with stock files: $total_replaced_with_stock"
+        fi
+
         echo "Files deleted: $total_deleted"
         echo "Files unchanged: $total_unchanged (includes functionally identical watermarked files)"
         echo
