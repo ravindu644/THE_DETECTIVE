@@ -613,6 +613,9 @@ TEMP_DIR="$OUTPUT_DIR/temp"
 mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
 echo "Results will be saved in: $OUTPUT_DIR"
 
+# --- Timer Start ---
+start_time=$SECONDS
+
 # --- Phase 2: Hash Generation and Comparison ---
 echo
 echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
@@ -814,6 +817,12 @@ if [[ -n "$ORIGINAL_USER" && -n "$ORIGINAL_UID" && -n "$ORIGINAL_GID" ]]; then
     echo "Output directory ownership transferred successfully."
 fi
 
+# --- Timer End and Calculation ---
+end_time=$SECONDS
+duration=$((end_time - start_time))
+minutes=$((duration / 60))
+seconds=$((duration % 60))
+
 echo
 echo -e "${BOLD}${GREEN}"
 echo "=========================================="
@@ -824,4 +833,5 @@ echo -e "All results have been saved to: ${BOLD}$OUTPUT_DIR${RESET}"
 if [[ -n "$ORIGINAL_USER" ]]; then
     echo -e "Directory ownership: ${BOLD}$ORIGINAL_USER${RESET}"
 fi
+echo -e "${YELLOW}Elapsed Time: ${minutes} minutes and ${seconds} seconds.${RESET}"
 echo
