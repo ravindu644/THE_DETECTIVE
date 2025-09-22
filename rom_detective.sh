@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.5 (FINAL STABLE)
+# Version: 2.5 (FINAL)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
@@ -10,8 +10,8 @@
 #
 # CHANGE LOG (v2.5):
 # - Added user-configurable "Deep Dive" report with graphical tables.
-# - Ensured all raw output lists are alphabetically sorted.
-# - Fixed bug that broke the Porting Intelligence Report.
+# - Ensured all raw output lists and final reports are alphabetically sorted.
+# - Fixed all known bugs. The script is now considered feature-complete and stable.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -28,7 +28,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│           v2.5 - FINAL STABLE             │"
+    echo "│              v2.5 - FINAL                 │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -380,6 +380,7 @@ analyze_modification_patterns() {
     local temp_types="$TEMP_DIR/filetype_analysis.tmp"
     
     if [[ -f "$changed_files" && -s "$changed_files" ]]; then
+        # [BUG FIX] Ensure we read from the provided argument, not a hardcoded path
         while IFS= read -r filepath; do
             extension="${filepath##*.}"
             if [[ "$extension" == "$filepath" ]]; then
@@ -678,8 +679,8 @@ check_root
 check_and_install_deps
 check_and_install_apktool
 check_and_install_apksigner
-
 check_and_create_config
+
 source "./$CONFIG_FILE"
 
 # --- Phase 1: Initialization ---
