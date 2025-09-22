@@ -2,15 +2,20 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.4 (STABLE)
+# Version: 2.6
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# CHANGE LOG (v2.4):
-# - Added prompt for custom output folder name.
-# - Fixed bug where hashing would fail if directories didn't exist yet.
+# CHANGE LOG (v2.6):
+# - Implemented blacklisting for files and extensions (e.g., odex, vdex) to
+#   separate useless changes from the main analysis.
+# - Fixed config file permissions to ensure it's always editable by the
+#   original user who invoked sudo.
+# - Re-organized and cleaned up the final Analysis_Summary.txt for better
+#   readability and a more logical flow of information.
+# - Fixed a bug where report files were being written to an undeclared directory.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -20,6 +25,10 @@ GREEN="\033[32m"
 YELLOW="\033[33m"
 RESET="\033[0m"
 
+# Store original user for config file ownership. This is crucial for allowing
+# non-root users to edit the config file after it's created.
+ORIGINAL_USER="${SUDO_USER:-$USER}"
+
 # --- Functions ---
 
 # Banner function
@@ -27,7 +36,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│            v2.4 - STABLE RELEASE          │"
+    echo "│              v2.6                         │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -48,7 +57,7 @@ check_and_install_deps() {
     declare -A deps=(
         ["diffutils"]="diff"
         ["binutils"]="readelf strings"
-        ["default-jre-headless"]="java"
+        ["openjdk-17-jdk"]="java"
         ["wget"]="wget"
         ["findutils"]="find"
         ["sed"]="sed"
@@ -113,8 +122,48 @@ check_and_install_apktool() {
     else
         echo "Apktool is already installed."
     fi
-    echo
 }
+
+# Function to fix config file permissions, ensuring the original user can edit it.
+# This is called immediately after the config file is created.
+fix_config_permissions() {
+    if [[ -f "$CONFIG_FILE" && -n "$ORIGINAL_USER" ]]; then
+        chown "$ORIGINAL_USER" "$CONFIG_FILE"
+        echo "Configuration file ownership assigned to '$ORIGINAL_USER' for easy editing."
+    fi
+}
+
+# Function to check for and install apksigner
+check_and_install_apksigner() {
+    if ! command -v "apksigner" &> /dev/null; then
+        echo "apksigner not found. Attempting to install it system-wide..."
+        export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+        
+        echo " -> Downloading Android SDK command-line tools..."
+        wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+        
+        echo " -> Unzipping and placing tools..."
+        unzip -q /tmp/cmdline-tools.zip -d /tmp/
+        mkdir -p /usr/lib/android-sdk/cmdline-tools/
+        mv /tmp/cmdline-tools /usr/lib/android-sdk/cmdline-tools/latest
+
+        echo " -> Installing Android SDK Build-Tools (this may take a moment)..."
+        yes | /usr/lib/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null
+        /usr/lib/android-sdk/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" > /dev/null
+
+        echo " -> Creating symlink for easy access..."
+        ln -s /usr/lib/android-sdk/build-tools/34.0.0/apksigner /usr/local/bin/apksigner
+
+        if ! command -v "apksigner" &> /dev/null; then
+             echo "Error: apksigner installation failed. Please try installing the Android SDK Build-Tools manually."
+             exit 1
+        fi
+        echo "apksigner has been installed successfully."
+    else
+        echo "apksigner is already installed."
+    fi
+}
+
 
 # Function to create a default config file if it doesn't exist
 check_and_create_config() {
@@ -154,7 +203,23 @@ BINARY_ANALYSIS_METHODS="hexdump strings readelf"
 # A space-separated list of extensions to ALWAYS treat as text files,
 # overriding the automatic detection. Useful for files like .rc or .bp
 # that might be misidentified as binary.
-FORCE_TEXT_EXTENSIONS="rc prop xml sh bp"
+FORCE_TEXT_EXTENSIONS="rc prop xml sh bp json"
+
+# --- Blacklisting ---
+# A space-separated list of file extensions to move from the "changed" list
+# to a separate "blacklisted" report. This is for files that change but
+# provide no useful diff information (e.g., compiled odex/vdex files).
+BLACKLIST_EXTENSIONS="odex vdex oat art prof art"
+
+# A space-separated list of exact filenames/paths to blacklist.
+# eg: BLACKLIST_FILES="./system/priv-app/SamsungCoreServices/SamsungCoreServices.apk.gz"
+BLACKLIST_FILES=""
+
+# --- Deep Dive Analysis ---
+# A space-separated list of critical directories you want a detailed,
+# categorized report for. Use this to focus on the most important areas.
+# Paths must start with './' (e.g., ./system/bin).
+CRITICAL_DIRECTORIES="./system/apex ./system/bin ./system/etc ./system/framework ./system/lib ./system/lib64"
 
 # --- Archive Analysis ---
 # Enable/disable deep analysis of archive contents (.zip, .apex, etc.)
@@ -162,6 +227,12 @@ ANALYZE_ARCHIVES="true"
 # Space-separated list of extensions to treat as archives.
 # NOTE: .apk and .jar are handled separately by the APKTOOL_COMMAND.
 ARCHIVE_EXTENSIONS="apex zip"
+
+# --- APK Signature Analysis ---
+# When enabled, the script will use 'apksigner' to check if a changed APK
+# was re-signed by the porter (suspicious) or just officially updated by the OEM.
+# This can save hours by skipping apktool analysis on hundreds of official updates.
+ENABLE_APK_SIGNATURE_FILTER="true"
 
 # --- Signature Filtering ---
 # Enable filtering of files with only signature/metadata changes
@@ -174,9 +245,35 @@ __build__
 _CI_BUILD_
 _metadata_"
 EOF
-        echo "Configuration has been created."
+        echo "Default configuration has been created."
+        # This is where we ensure the new config file is owned by the user.
+        fix_config_permissions
         read -p "Please review/edit '$CONFIG_FILE' to your liking now, then press [Enter] to begin the analysis."
     fi
+}
+
+# Function to check if a file is blacklisted based on the config settings.
+# Returns 0 (true) if the file matches a name or extension in the blacklist.
+is_blacklisted_file() {
+    local file_path="$1"
+    
+    # Check if the exact file path is blacklisted
+    for blacklist_file in $BLACKLIST_FILES; do
+        if [[ "$file_path" == "$blacklist_file" ]]; then
+            return 0
+        fi
+    done
+    
+    # Check if the file's extension is blacklisted
+    local ext="${file_path##*.}"
+    for blacklist_ext in $BLACKLIST_EXTENSIONS; do
+        if [[ "$ext" == "$blacklist_ext" ]]; then
+            return 0
+        fi
+    done
+    
+    # Not blacklisted
+    return 1
 }
 
 # Function to check if a file has only signature changes
@@ -185,57 +282,72 @@ check_signature_only_changes() {
     local base_file="$BASE_ROM_PATH/$file_path"
     local ported_file="$PORTED_ROM_PATH/$file_path"
     
-    # Only process if signature filtering is enabled
     if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" != "true" ]]; then
-        return 1  # Not signature-only, continue normal processing
+        return 1
     fi
     
-    # Skip if either file doesn't exist
     if [[ ! -f "$base_file" || ! -f "$ported_file" ]]; then
         return 1
     fi
     
-    # Get file sizes
     local base_size=$(wc -c < "$base_file" 2>/dev/null || echo 0)
     local ported_size=$(wc -c < "$ported_file" 2>/dev/null || echo 0)
     
-    # If ported is smaller than base, definitely not signature-only addition
     if [[ $ported_size -le $base_size ]]; then
         return 1
     fi
     
-    # Calculate size difference
     local size_diff=$((ported_size - base_size))
     
-    # If difference is too large, unlikely to be just signature
     if [[ $size_diff -gt 100 ]]; then
         return 1
     fi
     
-    # Extract the potential signature (last N bytes of ported file)
     local signature_candidate
     signature_candidate=$(tail -c "$size_diff" "$ported_file" 2>/dev/null | tr -d '\0\n\r' | strings -a | head -1)
     
-    # Check if this signature matches any ignore patterns
     if [[ -n "$signature_candidate" ]]; then
         while IFS= read -r pattern; do
-            # Skip empty lines and comments
             [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
             
-            # Check if signature matches pattern (basic regex support)
             if echo "$signature_candidate" | grep -qE "$pattern"; then
-                # Verify the base file + signature = ported file
                 if head -c "$base_size" "$ported_file" | cmp -s - "$base_file"; then
-                    return 0  # This is signature-only
+                    return 0
                 fi
             fi
         done <<< "$IGNORE_SIGNATURE_PATTERNS"
     fi
     
-    return 1  # Not signature-only
+    return 1
 }
 
-# New function to compare files using pure awk
+# New function to check if APK signatures are different
+check_apk_signatures_differ() {
+    local base_apk="$1"
+    local ported_apk="$2"
+
+    local base_sig
+    base_sig=$(apksigner verify --print-certs "$base_apk" 2>/dev/null | grep "SHA-256 digest" | awk '{print $NF}')
+    local ported_sig
+    ported_sig=$(apksigner verify --print-certs "$ported_apk" 2>/dev/null | grep "SHA-256 digest" | awk '{print $NF}')
+
+    if [[ -z "$base_sig" || -z "$ported_sig" ]]; then
+        # If we can't get a signature from either, assume it's a real change.
+        return 0
+    fi
+
+    if [[ "$base_sig" != "$ported_sig" ]]; then
+        # Signatures are different, this is a porter modification.
+        return 0
+    else
+        # Signatures are the same, this is an official update.
+        return 1
+    fi
+}
+
+
+# Function to compare hash lists and categorize files into deleted, new, changed, and unchanged.
+# This now includes logic to filter out blacklisted files from the main "changed" list.
 compare_hash_files() {
     local base_hashes="$1"
     local ported_hashes="$2"
@@ -246,89 +358,104 @@ compare_hash_files() {
     
     echo "Analyzing file differences using AWK-based comparison..." >&2
     
-    # Use a single AWK script to process both files and generate all outputs
+    # AWK script to perform the main file comparison based on hashes
     awk '
-    BEGIN {
-        print "Processing hash files..." > "/dev/stderr"
-    }
-    
-    # Process base ROM hashes (first file)
     FNR==NR {
-        # Store base file info: base_files[filepath] = hash
         base_files[$2] = $1
         base_count++
         next
     }
-    
-    # Process ported ROM hashes (second file)  
     {
         filepath = $2
         ported_hash = $1
         
         if (filepath in base_files) {
-            # File exists in both - check if changed
             if (base_files[filepath] != ported_hash) {
                 print filepath > changed_file
             } else {
                 print filepath > unchanged_file
             }
-            # Mark as processed
             delete base_files[filepath]
         } else {
-            # File is new in ported ROM
             print filepath > new_file
         }
         ported_count++
     }
-    
     END {
-        # Remaining files in base_files array are deleted files
         for (filepath in base_files) {
             print filepath > deleted_file
         }
-        
-        printf "Processed %d base files and %d ported files\n", base_count, ported_count > "/dev/stderr"
     }
     ' changed_file="$changed_output" deleted_file="$deleted_output" new_file="$new_output" unchanged_file="$unchanged_output" \
       "$base_hashes" "$ported_hashes"
     
-    # Post-process changed files for signature filtering
-    if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -f "$changed_output" ]]; then
-        echo -e "\nFiltering signature-only changes..." >&2
+    # Post-processing for the "changed" files list
+    if [[ -f "$changed_output" ]]; then
+        echo -e "\nFiltering signature and blacklisted changes..." >&2
         
         local temp_changed="$TEMP_DIR/filtered_changed.tmp"
         local temp_signature_only="$TEMP_DIR/signature_only.tmp"
+        local temp_blacklisted="$TEMP_DIR/blacklisted.tmp"
         
         > "$temp_changed"
         > "$temp_signature_only"
+        > "$temp_blacklisted"
         
         local total_changed=$(wc -l < "$changed_output")
         local current=0
         
+        # Iterate through initially changed files to filter them further
         while IFS= read -r filepath; do
             ((current++))
             printf "\r -> Filtering file %d of %d: %-50s" "$current" "$total_changed" "$(basename "$filepath")" >&2
             
-            if check_signature_only_changes "$filepath"; then
+            if is_blacklisted_file "$filepath"; then
+                # This file is blacklisted, move it to the blacklisted list.
+                echo "$filepath" >> "$temp_blacklisted"
+            elif [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" ]] && check_signature_only_changes "$filepath"; then
+                # This file only has signature changes, move it to the signature-only list.
                 echo "$filepath" >> "$temp_signature_only"
             else
+                # This is a real change.
                 echo "$filepath" >> "$temp_changed"
             fi
         done < "$changed_output" 
-        printf "\r\033[K" >&2 # Clear the progress line before printing the summary
+        printf "\r\033[K" >&2
         
-        # Replace the changed file list with filtered results
+        # Replace original changed list with the filtered one
         mv "$temp_changed" "$changed_output"
+        
+        # Add signature-only files to the unchanged list
         local signature_count=$(wc -l < "$temp_signature_only" 2>/dev/null || echo 0)
-        local real_changed_count=$(wc -l < "$changed_output" 2>/dev/null || echo 0)
-
-        # Append signature-only files to the main unchanged list
         if [[ $signature_count -gt 0 ]]; then
             cat "$temp_signature_only" >> "$unchanged_output"
         fi
+        
+        # Handle blacklisted files by creating a separate report for them
+        local blacklist_count=$(wc -l < "$temp_blacklisted" 2>/dev/null || echo 0)
+        if [[ $blacklist_count -gt 0 ]]; then
+            local blacklist_output="$REPORT_DIR/blacklisted_changes.txt"
+            mkdir -p "$(dirname "$blacklist_output")"
+            
+            {
+                echo "================================================================"
+                echo " BLACKLISTED FILE CHANGES - Not included in main analysis"
+                echo "================================================================"
+                echo "These files are configured to be tracked separately as they"
+                echo "typically represent useless changes (like odex/vdex files)."
+                echo
+                echo "Changed blacklisted files:"
+                echo "-------------------------"
+                sort "$temp_blacklisted"
+                echo
+                echo "Total blacklisted changes: $blacklist_count"
+            } > "$blacklist_output"
+            
+            echo -e "\nFound $blacklist_count blacklisted file changes - see reports/blacklisted_changes.txt" >&2
+        fi
 
-        echo -e "\n${BOLD}Filtered out $signature_count signature-only changes, $real_changed_count real changes remain${RESET}" >&2
-        echo "$signature_count" # Output the count for the main script
+        # Return the count of signature-only changes found
+        echo "$signature_count"
     fi
 }
 
@@ -345,6 +472,7 @@ analyze_modification_patterns() {
     local temp_types="$TEMP_DIR/filetype_analysis.tmp"
     
     if [[ -f "$changed_files" && -s "$changed_files" ]]; then
+        # [BUG FIX] Ensure we read from the provided argument, not a hardcoded path
         while IFS= read -r filepath; do
             extension="${filepath##*.}"
             if [[ "$extension" == "$filepath" ]]; then
@@ -459,6 +587,152 @@ analyze_modification_patterns() {
     rm -f "$temp_analysis" "$temp_dirs" "$temp_types"
 }
 
+# New function to generate a focused, graphical report for critical directories
+generate_deep_dive_report() {
+    local output_file="$1"
+
+    echo "Generating Deep Dive Analysis Report..."
+
+    {
+        echo "======================================================="
+        echo " DETECTIVE DEEP DIVE ANALYSIS REPORT"
+        echo "======================================================="
+        echo "This report provides a focused, table-based breakdown of changes within user-defined critical directories."
+        echo
+
+        for crit_dir in $CRITICAL_DIRECTORIES; do
+            # Ensure the directory path ends with a slash for more precise matching
+            [[ "$crit_dir" != */ ]] && crit_dir="$crit_dir/"
+
+            echo "--------------------------------------------------------------------------------"
+            printf "ANALYSIS FOR: %s\n" "$crit_dir"
+            echo "--------------------------------------------------------------------------------"
+
+            # Create temporary filtered lists for the current directory
+            grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" > "$TEMP_DIR/dd_replaced.list" 2>/dev/null || touch "$TEMP_DIR/dd_replaced.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" > "$TEMP_DIR/dd_added_stock.list" 2>/dev/null || touch "$TEMP_DIR/dd_added_stock.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/dd_changed.list" 2>/dev/null || touch "$TEMP_DIR/dd_changed.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" > "$TEMP_DIR/dd_new.list" 2>/dev/null || touch "$TEMP_DIR/dd_new.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" > "$TEMP_DIR/dd_deleted.list" 2>/dev/null || touch "$TEMP_DIR/dd_deleted.list"
+
+            # Check if any of the lists have content
+            local has_data=false
+            for list_file in "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"; do
+                if [[ -s "$list_file" ]]; then
+                    has_data=true
+                    break
+                fi
+            done
+
+            if [[ "$has_data" == "false" ]]; then
+                echo "No changes detected in this directory."
+                echo
+                continue
+            fi
+
+            # Generate flexible table using dynamic column widths
+            awk '
+            BEGIN {
+                # Load all data and count non-empty entries
+                while ((getline line < ARGV[1]) > 0) if (line) { replaced[++r_count] = basename(line) }
+                while ((getline line < ARGV[2]) > 0) if (line) { added_stock[++as_count] = basename(line) }
+                while ((getline line < ARGV[3]) > 0) if (line) { changed[++c_count] = basename(line) }
+                while ((getline line < ARGV[4]) > 0) if (line) { new_files[++nf_count] = basename(line) }
+                while ((getline line < ARGV[5]) > 0) if (line) { deleted[++d_count] = basename(line) }
+                
+                # Find maximum rows needed (only count non-empty lists)
+                max_rows = 0
+                if (r_count > max_rows) max_rows = r_count
+                if (as_count > max_rows) max_rows = as_count
+                if (c_count > max_rows) max_rows = c_count
+                if (nf_count > max_rows) max_rows = nf_count
+                if (d_count > max_rows) max_rows = d_count
+                
+                if (max_rows == 0) {
+                    print "No changes detected."
+                    exit
+                }
+                
+                # Calculate dynamic column widths based on content
+                col1_width = length("[REPLACED] w/ Stock")
+                col2_width = length("[ADDED] from Stock")
+                col3_width = length("[CHANGED] by Porter")
+                col4_width = length("[NEW] Files")
+                col5_width = length("[DELETED] Files")
+                
+                for (i = 1; i <= r_count; i++) if (length(replaced[i]) > col1_width) col1_width = length(replaced[i])
+                for (i = 1; i <= as_count; i++) if (length(added_stock[i]) > col2_width) col2_width = length(added_stock[i])
+                for (i = 1; i <= c_count; i++) if (length(changed[i]) > col3_width) col3_width = length(changed[i])
+                for (i = 1; i <= nf_count; i++) if (length(new_files[i]) > col4_width) col4_width = length(new_files[i])
+                for (i = 1; i <= d_count; i++) if (length(deleted[i]) > col5_width) col5_width = length(deleted[i])
+                
+                # Cap maximum column width to prevent overly wide tables
+                max_col_width = 50
+                if (col1_width > max_col_width) col1_width = max_col_width
+                if (col2_width > max_col_width) col2_width = max_col_width
+                if (col3_width > max_col_width) col3_width = max_col_width
+                if (col4_width > max_col_width) col4_width = max_col_width
+                if (col5_width > max_col_width) col5_width = max_col_width
+                
+                # Ensure minimum width
+                if (col1_width < 20) col1_width = 20
+                if (col2_width < 20) col2_width = 20
+                if (col3_width < 20) col3_width = 20
+                if (col4_width < 15) col4_width = 15
+                if (col5_width < 15) col5_width = 15
+                
+                separator_width = col1_width + col2_width + col3_width + col4_width + col5_width + 16
+            }
+            END {
+                # Print header
+                printf "\n"
+                printf "%-*s | %-*s | %-*s | %-*s | %-*s\n", 
+                    col1_width, "[REPLACED] w/ Stock", 
+                    col2_width, "[ADDED] from Stock", 
+                    col3_width, "[CHANGED] by Porter", 
+                    col4_width, "[NEW] Files", 
+                    col5_width, "[DELETED] Files"
+                
+                # Print separator
+                for (i = 0; i < separator_width; i++) printf "-"
+                printf "\n"
+                
+                # Print data rows (only up to max_rows, no empty rows)
+                for (i = 1; i <= max_rows; i++) {
+                    printf "%-*s | %-*s | %-*s | %-*s | %-*s\n",
+                        col1_width, (i <= r_count ? truncate_if_needed(replaced[i], col1_width) : ""),
+                        col2_width, (i <= as_count ? truncate_if_needed(added_stock[i], col2_width) : ""),
+                        col3_width, (i <= c_count ? truncate_if_needed(changed[i], col3_width) : ""),
+                        col4_width, (i <= nf_count ? truncate_if_needed(new_files[i], col4_width) : ""),
+                        col5_width, (i <= d_count ? truncate_if_needed(deleted[i], col5_width) : "")
+                }
+                printf "\n"
+                
+                # Print summary counts
+                printf "TOTALS: %d replaced, %d added, %d changed, %d new, %d deleted\n\n", 
+                    r_count, as_count, c_count, nf_count, d_count
+            }
+            
+            function basename(path) {
+                # Extract filename from full path
+                gsub(/.*\//, "", path)
+                return path
+            }
+            
+            function truncate_if_needed(text, width) {
+                if (length(text) > width) {
+                    return substr(text, 1, width - 3) "..."
+                }
+                return text
+            }
+            ' "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
+            
+            # Clean up temporary files for this directory
+            rm -f "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
+        done
+    } > "$output_file"
+}
+
 # File classification and analysis function
 analyze_file() {
     local relative_path="$1"
@@ -559,8 +833,10 @@ print_banner
 check_root
 check_and_install_deps
 check_and_install_apktool
+check_and_install_apksigner
 check_and_create_config
 
+# Load the configuration file into the script's environment
 source "./$CONFIG_FILE"
 
 # --- Phase 1: Initialization ---
@@ -595,9 +871,16 @@ else
     echo -e "\nMode: Dual-Compare"
 fi
 
+# --- Timer Start ---
+start_time=$SECONDS
+
+# --- Phase 2: Hash Generation and Comparison ---
+echo
+echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
+
 # Setup output environment
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-DEFAULT_FOLDER_NAME="final_detective_folder_$TIMESTAMP"
+DEFAULT_FOLDER_NAME="detective_results_$TIMESTAMP"
 SCRIPT_DIR=$(pwd)
 
 read -e -p "Enter custom output folder name (or press Enter for default: $DEFAULT_FOLDER_NAME): " CUSTOM_FOLDER_NAME
@@ -608,25 +891,22 @@ else
     OUTPUT_DIR="$SCRIPT_DIR/$CUSTOM_FOLDER_NAME"
 fi
 
+# Define all output directories
 PATCHES_DIR="$OUTPUT_DIR/patches"
 RAW_LISTS_DIR="$OUTPUT_DIR/raw_file_lists"
+REPORT_DIR="$OUTPUT_DIR/reports"
 TEMP_DIR="$OUTPUT_DIR/temp"
 
-# --- Timer Start ---
-start_time=$SECONDS
-
-# --- Phase 2: Hash Generation and Comparison ---
-echo
-echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
-
 # Create all necessary directories and files *before* starting analysis
-mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
+mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$REPORT_DIR" "$TEMP_DIR"
+# Pre-create all result files to prevent "No such file" errors
 touch "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
 touch "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
 touch "$RAW_LISTS_DIR/03_NEW_FILES.txt"
 touch "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
 touch "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
 touch "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
+touch "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt"
 echo "Results will be saved in: $OUTPUT_DIR"
 
 
@@ -654,7 +934,7 @@ fi
 
 echo -e "Hash generation complete. Comparing files...\n"
 
-# Capture the count of filtered files from the function's output
+# This function now returns the count of signature-only (watermarked) files found
 SIGNATURE_COUNT=$(compare_hash_files \
     "$TEMP_DIR/base.hashes" \
     "$TEMP_DIR/ported.hashes" \
@@ -663,6 +943,44 @@ SIGNATURE_COUNT=$(compare_hash_files \
     "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" \
     "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
 )
+
+# Post-analysis filtering for APKs based on their digital signatures
+if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
+    echo -e "\nFiltering changed APKs by signature..." >&2
+    
+    temp_real_changes="$TEMP_DIR/real_apk_changes.tmp"
+    temp_official_updates="$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt"
+    > "$temp_real_changes"
+    > "$temp_official_updates"
+    
+    total_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)
+    current_apk=0
+    
+    while IFS= read -r filepath; do
+        # We only care about APKs in this filter
+        if [[ "$filepath" == *.apk ]]; then
+            ((current_apk++))
+            printf "\r -> Checking APK signature %d of %d: %-50s" "$current_apk" "$total_apks" "$(basename "$filepath")" >&2
+            
+            if check_apk_signatures_differ "$BASE_ROM_PATH/$filepath" "$PORTED_ROM_PATH/$filepath"; then
+                # Signatures differ: likely a porter modification
+                echo "$filepath" >> "$temp_real_changes"
+            else
+                # Signatures match: likely an official OEM update
+                echo "$filepath" >> "$temp_official_updates"
+            fi
+        else
+            # Pass non-APK files through without checking
+            echo "$filepath" >> "$temp_real_changes"
+        fi
+    done < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    printf "\r\033[K" >&2
+    
+    mv "$temp_real_changes" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    official_updates_count=$(wc -l < "$temp_official_updates" 2>/dev/null || echo 0)
+    echo -e "${BOLD}Filtered out $official_updates_count official APK updates, $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt") real changes remain${RESET}" >&2
+fi
+
 
 # Handle triple-compare mode for transplanted files
 if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
@@ -705,12 +1023,26 @@ if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
     fi
 fi
 
+# Sort all the raw list files alphabetically for readability
+for f in "$RAW_LISTS_DIR"/*.txt; do
+    sort -o "$f" "$f"
+done
+
 echo "File comparison complete."
 
 # Print summary of findings
 echo
 echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
+if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
+    porter_modified_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)
+    echo "Porter modified APKs: $porter_modified_apks (will be deep scanned)"
+    echo "Official APK updates: $(wc -l < "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" 2>/dev/null || echo 0) (skipped deep scan)"
+fi
 echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
+if [[ -f "$REPORT_DIR/blacklisted_changes.txt" && -s "$REPORT_DIR/blacklisted_changes.txt" ]]; then
+    echo "Blacklisted changes: $(awk '/Total blacklisted changes:/ {print $NF}' "$REPORT_DIR/blacklisted_changes.txt") (see reports folder)"
+
+fi
 if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -n "$SIGNATURE_COUNT" && "$SIGNATURE_COUNT" -gt 0 ]]; then
     echo -e "${BOLD}Ignored Watermarked files:${RESET} $SIGNATURE_COUNT (moved to unchanged list)"
 fi
@@ -743,25 +1075,18 @@ else
 fi
 
 echo "Generating modification patterns analysis..."
-analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$PATCHES_DIR" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
+analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$PATCHES_DIR" "$REPORT_DIR/Porting_Intelligence_Report.txt"
+
+# Generate the new Deep Dive report
+generate_deep_dive_report "$REPORT_DIR/Deep_Dive_Analysis.txt"
 
 # --- Phase 4: Final Report & Cleanup ---
 echo
 echo "--- Phase 4: Generating Final Report ---"
 
-# Detect the original user (the one who called sudo)
-ORIGINAL_USER="${SUDO_USER:-$(logname 2>/dev/null)}"
-if [[ -n "$ORIGINAL_USER" && "$ORIGINAL_USER" != "root" ]]; then
-    ORIGINAL_UID=$(id -u "$ORIGINAL_USER" 2>/dev/null)
-    ORIGINAL_GID=$(id -g "$ORIGINAL_USER" 2>/dev/null)
-    echo "Detected original user: $ORIGINAL_USER (UID: $ORIGINAL_UID, GID: $ORIGINAL_GID)"
-else
-    ORIGINAL_USER=""
-    echo "Warning: Could not detect original user. Output will remain owned by root."
-fi
-
 SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
 
+# Generate the main summary report with a clean, logical structure.
 {
     echo "======================================================="
     echo " Forensic Analysis Report - Generated by The Detective"
@@ -770,46 +1095,47 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
     echo
     echo "Ported ROM: $PORTED_ROM_PATH"
     echo "Base ROM:   $BASE_ROM_PATH"
-    [[ "$ANALYSIS_MODE" == "TRIPLE" ]] && echo "Stock ROM: $TARGET_STOCK_PATH"
+    [[ "$ANALYSIS_MODE" == "TRIPLE" ]] && echo "Stock ROM:  $TARGET_STOCK_PATH"
     echo "-------------------------------------------------------"
+    echo
+
+    echo "--- [DELETED] Files (Present in Base, missing in Ported) ---"
+    if [[ -s "$RAW_LISTS_DIR/01_DELETED_FILES.txt" ]]; then cat "$RAW_LISTS_DIR/01_DELETED_FILES.txt"; else echo "None"; fi
+    echo
+
+    echo "--- [NEW] Files (Present in Ported, missing in Base) ---"
+    if [[ -s "$RAW_LISTS_DIR/03_NEW_FILES.txt" ]]; then cat "$RAW_LISTS_DIR/03_NEW_FILES.txt"; else echo "None"; fi
     echo
 
     if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
         echo "--- [REPLACED] Base ROM Files with Target Stock Versions ---"
-        if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
-            cat "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
-        fi
+        if [[ -s "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then cat "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"; else echo "None"; fi
         echo
 
         echo "--- [ADDED] New Files from Target Stock ROM ---"
-        if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
-            cat "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
-        fi
-        echo    
+        if [[ -s "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then cat "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"; else echo "None"; fi
+        echo
     fi
-
-    echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
-    if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
-    fi
-    echo
 
     echo "--- [CHANGED] Files (Content differs from Base ROM) ---"
-    if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    if [[ -s "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then cat "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"; else echo "None"; fi
+    echo
+
+    echo "--- [BLACKLISTED] Useless Changes (Tracked Separately) ---"
+    if [[ -s "$REPORT_DIR/blacklisted_changes.txt" ]]; then
+        # Extract just the file list from the dedicated blacklist report
+        awk '/^-+$/,!seen {seen=1;next} seen && NF {print} !NF {exit}' "$REPORT_DIR/blacklisted_changes.txt"
+    else
+        echo "None"
     fi
     echo
 
-    echo "--- [NEW] Files (Present in Ported, missing in Base) ---"
-    if [[ -f "$RAW_LISTS_DIR/03_NEW_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/03_NEW_FILES.txt"
-    fi
+    echo "--- [OFFICIAL UPDATES] (Same signature, different hash) ---"
+    if [[ -s "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" ]]; then cat "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt"; else echo "None"; fi
     echo
 
-    echo "--- [DELETED] Files (Present in Base, missing in Ported) ---"
-    if [[ -f "$RAW_LISTS_DIR/01_DELETED_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
-    fi
+    echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
+    if [[ -s "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then cat "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"; else echo "None"; fi
     echo
     
 } > "$SUMMARY_FILE"
@@ -820,9 +1146,9 @@ if [[ "$CLEANUP_TEMP_FILES" == "true" ]]; then
 fi
 
 # Change ownership of output directory to original user
-if [[ -n "$ORIGINAL_USER" && -n "$ORIGINAL_UID" && -n "$ORIGINAL_GID" ]]; then
+if [[ -n "$ORIGINAL_USER" && "$ORIGINAL_USER" != "root" ]]; then
     echo "Changing ownership of output directory to $ORIGINAL_USER..."
-    chown -R "$ORIGINAL_UID:$ORIGINAL_GID" "$OUTPUT_DIR"
+    chown -R "$ORIGINAL_USER:$ORIGINAL_USER" "$OUTPUT_DIR"
     echo "Output directory ownership transferred successfully."
 fi
 
@@ -839,7 +1165,7 @@ echo "         ANALYSIS COMPLETE"
 echo "=========================================="
 echo -e "${RESET}"
 echo -e "All results have been saved to: ${BOLD}$OUTPUT_DIR${RESET}"
-if [[ -n "$ORIGINAL_USER" ]]; then
+if [[ -n "$ORIGINAL_USER" && "$ORIGINAL_USER" != "root" ]]; then
     echo -e "Directory ownership: ${BOLD}$ORIGINAL_USER${RESET}"
 fi
 echo -e "${YELLOW}Elapsed Time: ${minutes} minutes and ${seconds} seconds.${RESET}"
