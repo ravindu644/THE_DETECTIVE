@@ -2,15 +2,16 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.4 (STABLE)
+# Version: 2.5 (DEEP DIVE REPORT)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# CHANGE LOG (v2.4):
-# - Added prompt for custom output folder name.
-# - Fixed bug where hashing would fail if directories didn't exist yet.
+# CHANGE LOG (v2.5):
+# - Added user-configurable "Deep Dive" report for critical directories.
+# - The Deep Dive report generates a clean, sorted, table-like view.
+# - Ensured all raw output lists are alphabetically sorted.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -27,7 +28,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│            v2.4 - STABLE RELEASE          │"
+    echo "│        v2.5 - DEEP DIVE REPORTING         │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -155,6 +156,12 @@ BINARY_ANALYSIS_METHODS="hexdump strings readelf"
 # overriding the automatic detection. Useful for files like .rc or .bp
 # that might be misidentified as binary.
 FORCE_TEXT_EXTENSIONS="rc prop xml sh bp"
+
+# --- Deep Dive Analysis ---
+# A space-separated list of critical directories you want a detailed,
+# categorized report for. Use this to focus on the most important areas.
+# Paths must start with './' (e.g., ./system/bin).
+CRITICAL_DIRECTORIES="./system/bin ./system/lib ./system/lib64 ./system/etc/init ./system/framework ./system/apex"
 
 # --- Archive Analysis ---
 # Enable/disable deep analysis of archive contents (.zip, .apex, etc.)
@@ -459,6 +466,68 @@ analyze_modification_patterns() {
     rm -f "$temp_analysis" "$temp_dirs" "$temp_types"
 }
 
+# New function to generate a focused, human-readable report for critical directories
+generate_deep_dive_report() {
+    local output_file="$1"
+
+    echo "Generating Deep Dive Analysis Report..."
+
+    {
+        echo "======================================================="
+        echo " DETECTIVE DEEP DIVE ANALYSIS REPORT"
+        echo "======================================================="
+        echo "This report provides a focused breakdown of changes within user-defined critical directories."
+        echo
+
+        for crit_dir in $CRITICAL_DIRECTORIES; do
+            # Ensure the directory path ends with a slash for more precise matching
+            [[ "$crit_dir" != */ ]] && crit_dir="$crit_dir/"
+
+            echo "-------------------------------------------------------"
+            echo "--- Analysis for Directory: $crit_dir"
+            echo "-------------------------------------------------------"
+            echo
+
+            # --- Replaced Files ---
+            if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
+                echo "--- [REPLACED] with Target Stock's version ---"
+                grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" | sort || echo "  (None)"
+                echo
+            fi
+
+            # --- Added Files from Stock ---
+            if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
+                echo "--- [ADDED] from Target Stock (did not exist in Base) ---"
+                grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" | sort || echo "  (None)"
+                echo
+            fi
+
+            # --- Changed Files ---
+            echo "--- [CHANGED] by manual edit/unknown source ---"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" | sort || echo "  (None)"
+            echo
+
+            # --- New Files of Unknown Origin ---
+            echo "--- [NEW] files of unknown origin ---"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" | sort || echo "  (None)"
+            echo
+            
+            # --- Deleted Files ---
+            echo "--- [DELETED] from Base ROM ---"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" | sort || echo "  (None)"
+            echo
+
+            # --- Unchanged Files ---
+            echo "--- [UNCHANGED] files ---"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" | sort | head -20 || echo "  (List truncated...)"
+            echo
+
+        done
+
+    } > "$output_file"
+}
+
+
 # File classification and analysis function
 analyze_file() {
     local relative_path="$1"
@@ -621,6 +690,7 @@ echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
 
 # Create all necessary directories and files *before* starting analysis
 mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
+# Pre-create all result files to prevent "No such file" errors in scenarios with zero changes/deletions/additions.
 touch "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
 touch "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
 touch "$RAW_LISTS_DIR/03_NEW_FILES.txt"
@@ -705,6 +775,11 @@ if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
     fi
 fi
 
+# Sort all the raw list files alphabetically for readability
+for f in "$RAW_LISTS_DIR"/*.txt; do
+    sort -o "$f" "$f"
+done
+
 echo "File comparison complete."
 
 # Print summary of findings
@@ -745,6 +820,9 @@ fi
 echo "Generating modification patterns analysis..."
 analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$PATCHES_DIR" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
 
+# Generate the new Deep Dive report
+generate_deep_dive_report "$OUTPUT_DIR/Deep_Dive_Analysis.txt"
+
 # --- Phase 4: Final Report & Cleanup ---
 echo
 echo "--- Phase 4: Generating Final Report ---"
@@ -777,38 +855,38 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
     if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
         echo "--- [REPLACED] Base ROM Files with Target Stock Versions ---"
         if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
-            cat "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
+            sort "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
         fi
         echo
 
         echo "--- [ADDED] New Files from Target Stock ROM ---"
         if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
-            cat "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
+            sort "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
         fi
         echo    
     fi
 
     echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
     if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
+        sort "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
     fi
     echo
 
     echo "--- [CHANGED] Files (Content differs from Base ROM) ---"
     if [[ -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+        sort "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
     fi
     echo
 
     echo "--- [NEW] Files (Present in Ported, missing in Base) ---"
     if [[ -f "$RAW_LISTS_DIR/03_NEW_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/03_NEW_FILES.txt"
+        sort "$RAW_LISTS_DIR/03_NEW_FILES.txt"
     fi
     echo
 
     echo "--- [DELETED] Files (Present in Base, missing in Ported) ---"
     if [[ -f "$RAW_LISTS_DIR/01_DELETED_FILES.txt" ]]; then
-        cat "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
+        sort "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
     fi
     echo
     
