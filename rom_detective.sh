@@ -832,7 +832,7 @@ if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
     printf "\r\033[K" >&2
     
     mv "$temp_real_changes" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
-    local official_updates_count=$(wc -l < "$temp_official_updates" 2>/dev/null || echo 0)
+    official_updates_count=$(wc -l < "$temp_official_updates" 2>/dev/null || echo 0)
     echo -e "${BOLD}Filtered out $official_updates_count official APK updates, $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt") real changes remain${RESET}" >&2
 fi
 
@@ -888,10 +888,15 @@ echo "File comparison complete."
 # Print summary of findings
 echo
 echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
-echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
+
 if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
-    echo "Official APK updates: $(wc -l < "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" 2>/dev/null || echo 0) (skipped deep analysis)"
+    porter_modified_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)
+    echo "Porter modified APKs: $porter_modified_apks (will be deep scanned)"
+    echo "Official APK updates: $(wc -l < "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" 2>/dev/null || echo 0) (skipped deep scan)"
 fi
+
+echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
+
 if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -n "$SIGNATURE_COUNT" && "$SIGNATURE_COUNT" -gt 0 ]]; then
     echo -e "${BOLD}Ignored Watermarked files:${RESET} $SIGNATURE_COUNT (moved to unchanged list)"
 fi
