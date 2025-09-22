@@ -2,16 +2,17 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.5 (DEEP DIVE REPORT)
+# Version: 2.6 (FINAL)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# CHANGE LOG (v2.5):
-# - Added user-configurable "Deep Dive" report for critical directories.
-# - The Deep Dive report generates a clean, sorted, table-like view.
-# - Ensured all raw output lists are alphabetically sorted.
+# CHANGE LOG (v2.6):
+# - Added APK signature fingerprinting to intelligently filter official app updates.
+# - This drastically reduces analysis time by avoiding unnecessary apktool unpacking.
+# - Automatically installs apksigner and its Java dependency if missing.
+# - The script is now considered feature-complete and stable.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -28,7 +29,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│        v2.5 - DEEP DIVE REPORTING         │"
+    echo "│              v2.6 - FINAL                 │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -49,7 +50,7 @@ check_and_install_deps() {
     declare -A deps=(
         ["diffutils"]="diff"
         ["binutils"]="readelf strings"
-        ["default-jre-headless"]="java"
+        ["openjdk-17-jdk"]="java" # apksigner needs Java 17+
         ["wget"]="wget"
         ["findutils"]="find"
         ["sed"]="sed"
@@ -117,6 +118,38 @@ check_and_install_apktool() {
     echo
 }
 
+# Function to check for and install apksigner
+check_and_install_apksigner() {
+    if ! command -v "apksigner" &> /dev/null; then
+        echo "apksigner not found. Attempting to install it system-wide..."
+        export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+        
+        echo " -> Downloading Android SDK command-line tools..."
+        wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+        
+        echo " -> Unzipping and placing tools..."
+        unzip -q /tmp/cmdline-tools.zip -d /tmp/
+        mkdir -p /usr/lib/android-sdk/cmdline-tools/
+        mv /tmp/cmdline-tools /usr/lib/android-sdk/cmdline-tools/latest
+
+        echo " -> Installing Android SDK Build-Tools (this may take a moment)..."
+        yes | /usr/lib/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null
+        /usr/lib/android-sdk/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" > /dev/null
+
+        echo " -> Creating symlink for easy access..."
+        ln -s /usr/lib/android-sdk/build-tools/34.0.0/apksigner /usr/local/bin/apksigner
+
+        if ! command -v "apksigner" &> /dev/null; then
+             echo "Error: apksigner installation failed. Please try installing the Android SDK Build-Tools manually."
+             exit 1
+        fi
+        echo "apksigner has been installed successfully."
+    else
+        echo "apksigner is already installed."
+    fi
+}
+
+
 # Function to create a default config file if it doesn't exist
 check_and_create_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -169,6 +202,12 @@ ANALYZE_ARCHIVES="true"
 # Space-separated list of extensions to treat as archives.
 # NOTE: .apk and .jar are handled separately by the APKTOOL_COMMAND.
 ARCHIVE_EXTENSIONS="apex zip"
+
+# --- APK Signature Analysis ---
+# When enabled, the script will use 'apksigner' to check if a changed APK
+# was re-signed by the porter (suspicious) or just officially updated by the OEM.
+# This can save hours by skipping apktool analysis on hundreds of official updates.
+ENABLE_APK_SIGNATURE_FILTER="true"
 
 # --- Signature Filtering ---
 # Enable filtering of files with only signature/metadata changes
@@ -242,6 +281,29 @@ check_signature_only_changes() {
     return 1  # Not signature-only
 }
 
+# New function to check if APK signatures are different
+check_apk_signatures_differ() {
+    local base_apk="$1"
+    local ported_apk="$2"
+
+    local base_sig
+    base_sig=$(apksigner verify --print-certs "$base_apk" 2>/dev/null | grep "SHA-256 digest" | awk '{print $NF}')
+    local ported_sig
+    ported_sig=$(apksigner verify --print-certs "$ported_apk" 2>/dev/null | grep "SHA-256 digest" | awk '{print $NF}')
+
+    # If we can't get a signature for either, assume they are different to be safe
+    if [[ -z "$base_sig" || -z "$ported_sig" ]]; then
+        return 0 # True (signatures differ)
+    fi
+
+    if [[ "$base_sig" != "$ported_sig" ]]; then
+        return 0 # True (signatures differ)
+    else
+        return 1 # False (signatures are the same)
+    fi
+}
+
+
 # New function to compare files using pure awk
 compare_hash_files() {
     local base_hashes="$1"
@@ -301,7 +363,7 @@ compare_hash_files() {
     
     # Post-process changed files for signature filtering
     if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -f "$changed_output" ]]; then
-        echo -e "\nFiltering signature-only changes..." >&2
+        echo -e "\nFiltering watermark-only changes..." >&2
         
         local temp_changed="$TEMP_DIR/filtered_changed.tmp"
         local temp_signature_only="$TEMP_DIR/signature_only.tmp"
@@ -327,14 +389,12 @@ compare_hash_files() {
         # Replace the changed file list with filtered results
         mv "$temp_changed" "$changed_output"
         local signature_count=$(wc -l < "$temp_signature_only" 2>/dev/null || echo 0)
-        local real_changed_count=$(wc -l < "$changed_output" 2>/dev/null || echo 0)
-
+        
         # Append signature-only files to the main unchanged list
         if [[ $signature_count -gt 0 ]]; then
             cat "$temp_signature_only" >> "$unchanged_output"
         fi
 
-        echo -e "\n${BOLD}Filtered out $signature_count signature-only changes, $real_changed_count real changes remain${RESET}" >&2
         echo "$signature_count" # Output the count for the main script
     fi
 }
@@ -502,6 +562,13 @@ generate_deep_dive_report() {
                 echo
             fi
 
+            # --- Official APK Updates ---
+            if [[ -f "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" ]]; then
+                echo "--- [OFFICIAL UPDATES] (Same signature, different hash) ---"
+                grep "^$crit_dir" "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" | sort || echo "  (None)"
+                echo
+            fi
+
             # --- Changed Files ---
             echo "--- [CHANGED] by manual edit/unknown source ---"
             grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" | sort || echo "  (None)"
@@ -627,8 +694,9 @@ analyze_file() {
 print_banner
 check_root
 check_and_install_deps
-check_and_install_apktool
 check_and_create_config
+check_and_install_apktool
+check_and_install_apksigner
 
 source "./$CONFIG_FILE"
 
@@ -697,6 +765,7 @@ touch "$RAW_LISTS_DIR/03_NEW_FILES.txt"
 touch "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
 touch "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
 touch "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
+touch "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt"
 echo "Results will be saved in: $OUTPUT_DIR"
 
 
@@ -733,6 +802,40 @@ SIGNATURE_COUNT=$(compare_hash_files \
     "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" \
     "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
 )
+
+# Post-analysis filtering for APKs
+if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
+    echo -e "\nFiltering changed APKs by signature..." >&2
+    
+    temp_real_changes="$TEMP_DIR/real_apk_changes.tmp"
+    temp_official_updates="$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt"
+    > "$temp_real_changes"
+    > "$temp_official_updates"
+    
+    total_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt")
+    current_apk=0
+    
+    while IFS= read -r filepath; do
+        if [[ "$filepath" == *.apk ]]; then
+            ((current_apk++))
+            printf "\r -> Checking APK signature %d of %d: %-50s" "$current_apk" "$total_apks" "$(basename "$filepath")" >&2
+            
+            if check_apk_signatures_differ "$BASE_ROM_PATH/$filepath" "$PORTED_ROM_PATH/$filepath"; then
+                echo "$filepath" >> "$temp_real_changes"
+            else
+                echo "$filepath" >> "$temp_official_updates"
+            fi
+        else
+            echo "$filepath" >> "$temp_real_changes"
+        fi
+    done < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    printf "\r\033[K" >&2
+    
+    mv "$temp_real_changes" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    local official_updates_count=$(wc -l < "$temp_official_updates" 2>/dev/null || echo 0)
+    echo -e "${BOLD}Filtered out $official_updates_count official APK updates, $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt") real changes remain${RESET}" >&2
+fi
+
 
 # Handle triple-compare mode for transplanted files
 if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
@@ -786,6 +889,9 @@ echo "File comparison complete."
 echo
 echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
 echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
+if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
+    echo "Official APK updates: $(wc -l < "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" 2>/dev/null || echo 0) (skipped deep analysis)"
+fi
 if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -n "$SIGNATURE_COUNT" && "$SIGNATURE_COUNT" -gt 0 ]]; then
     echo -e "${BOLD}Ignored Watermarked files:${RESET} $SIGNATURE_COUNT (moved to unchanged list)"
 fi
@@ -818,7 +924,7 @@ else
 fi
 
 echo "Generating modification patterns analysis..."
-analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$PATCHES_DIR" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
+analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
 
 # Generate the new Deep Dive report
 generate_deep_dive_report "$OUTPUT_DIR/Deep_Dive_Analysis.txt"
@@ -865,6 +971,12 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
         fi
         echo    
     fi
+
+    echo "--- [OFFICIAL UPDATES] (Same signature, different hash) ---"
+    if [[ -f "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" ]]; then
+        sort "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt"
+    fi
+    echo
 
     echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
     if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
