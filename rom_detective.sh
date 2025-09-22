@@ -2,17 +2,16 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.6 (FINAL)
+# Version: 2.5 (FINAL STABLE)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# CHANGE LOG (v2.6):
-# - Added APK signature fingerprinting to intelligently filter official app updates.
-# - This drastically reduces analysis time by avoiding unnecessary apktool unpacking.
-# - Automatically installs apksigner and its Java dependency if missing.
-# - The script is now considered feature-complete and stable.
+# CHANGE LOG (v2.5):
+# - Added user-configurable "Deep Dive" report with graphical tables.
+# - Ensured all raw output lists are alphabetically sorted.
+# - Fixed bug that broke the Porting Intelligence Report.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -29,7 +28,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│              v2.6 - FINAL                 │"
+    echo "│           v2.5 - FINAL STABLE             │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -50,7 +49,7 @@ check_and_install_deps() {
     declare -A deps=(
         ["diffutils"]="diff"
         ["binutils"]="readelf strings"
-        ["openjdk-17-jdk"]="java" # apksigner needs Java 17+
+        ["openjdk-17-jdk"]="java"
         ["wget"]="wget"
         ["findutils"]="find"
         ["sed"]="sed"
@@ -194,7 +193,7 @@ FORCE_TEXT_EXTENSIONS="rc prop xml sh bp"
 # A space-separated list of critical directories you want a detailed,
 # categorized report for. Use this to focus on the most important areas.
 # Paths must start with './' (e.g., ./system/bin).
-CRITICAL_DIRECTORIES="./system/bin ./system/lib ./system/lib64 ./system/etc/init ./system/framework ./system/apex"
+CRITICAL_DIRECTORIES="./system/apex ./system/bin ./system/etc ./system/framework ./system/lib ./system/lib64"
 
 # --- Archive Analysis ---
 # Enable/disable deep analysis of archive contents (.zip, .apex, etc.)
@@ -231,54 +230,43 @@ check_signature_only_changes() {
     local base_file="$BASE_ROM_PATH/$file_path"
     local ported_file="$PORTED_ROM_PATH/$file_path"
     
-    # Only process if signature filtering is enabled
     if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" != "true" ]]; then
-        return 1  # Not signature-only, continue normal processing
+        return 1
     fi
     
-    # Skip if either file doesn't exist
     if [[ ! -f "$base_file" || ! -f "$ported_file" ]]; then
         return 1
     fi
     
-    # Get file sizes
     local base_size=$(wc -c < "$base_file" 2>/dev/null || echo 0)
     local ported_size=$(wc -c < "$ported_file" 2>/dev/null || echo 0)
     
-    # If ported is smaller than base, definitely not signature-only addition
     if [[ $ported_size -le $base_size ]]; then
         return 1
     fi
     
-    # Calculate size difference
     local size_diff=$((ported_size - base_size))
     
-    # If difference is too large, unlikely to be just signature
     if [[ $size_diff -gt 100 ]]; then
         return 1
     fi
     
-    # Extract the potential signature (last N bytes of ported file)
     local signature_candidate
     signature_candidate=$(tail -c "$size_diff" "$ported_file" 2>/dev/null | tr -d '\0\n\r' | strings -a | head -1)
     
-    # Check if this signature matches any ignore patterns
     if [[ -n "$signature_candidate" ]]; then
         while IFS= read -r pattern; do
-            # Skip empty lines and comments
             [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
             
-            # Check if signature matches pattern (basic regex support)
             if echo "$signature_candidate" | grep -qE "$pattern"; then
-                # Verify the base file + signature = ported file
                 if head -c "$base_size" "$ported_file" | cmp -s - "$base_file"; then
-                    return 0  # This is signature-only
+                    return 0
                 fi
             fi
         done <<< "$IGNORE_SIGNATURE_PATTERNS"
     fi
     
-    return 1  # Not signature-only
+    return 1
 }
 
 # New function to check if APK signatures are different
@@ -291,15 +279,14 @@ check_apk_signatures_differ() {
     local ported_sig
     ported_sig=$(apksigner verify --print-certs "$ported_apk" 2>/dev/null | grep "SHA-256 digest" | awk '{print $NF}')
 
-    # If we can't get a signature for either, assume they are different to be safe
     if [[ -z "$base_sig" || -z "$ported_sig" ]]; then
-        return 0 # True (signatures differ)
+        return 0
     fi
 
     if [[ "$base_sig" != "$ported_sig" ]]; then
-        return 0 # True (signatures differ)
+        return 0
     else
-        return 1 # False (signatures are the same)
+        return 1
     fi
 }
 
@@ -315,53 +302,36 @@ compare_hash_files() {
     
     echo "Analyzing file differences using AWK-based comparison..." >&2
     
-    # Use a single AWK script to process both files and generate all outputs
     awk '
-    BEGIN {
-        print "Processing hash files..." > "/dev/stderr"
-    }
-    
-    # Process base ROM hashes (first file)
     FNR==NR {
-        # Store base file info: base_files[filepath] = hash
         base_files[$2] = $1
         base_count++
         next
     }
-    
-    # Process ported ROM hashes (second file)  
     {
         filepath = $2
         ported_hash = $1
         
         if (filepath in base_files) {
-            # File exists in both - check if changed
             if (base_files[filepath] != ported_hash) {
                 print filepath > changed_file
             } else {
                 print filepath > unchanged_file
             }
-            # Mark as processed
             delete base_files[filepath]
         } else {
-            # File is new in ported ROM
             print filepath > new_file
         }
         ported_count++
     }
-    
     END {
-        # Remaining files in base_files array are deleted files
         for (filepath in base_files) {
             print filepath > deleted_file
         }
-        
-        printf "Processed %d base files and %d ported files\n", base_count, ported_count > "/dev/stderr"
     }
     ' changed_file="$changed_output" deleted_file="$deleted_output" new_file="$new_output" unchanged_file="$unchanged_output" \
       "$base_hashes" "$ported_hashes"
     
-    # Post-process changed files for signature filtering
     if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -f "$changed_output" ]]; then
         echo -e "\nFiltering watermark-only changes..." >&2
         
@@ -384,18 +354,16 @@ compare_hash_files() {
                 echo "$filepath" >> "$temp_changed"
             fi
         done < "$changed_output" 
-        printf "\r\033[K" >&2 # Clear the progress line before printing the summary
+        printf "\r\033[K" >&2
         
-        # Replace the changed file list with filtered results
         mv "$temp_changed" "$changed_output"
         local signature_count=$(wc -l < "$temp_signature_only" 2>/dev/null || echo 0)
         
-        # Append signature-only files to the main unchanged list
         if [[ $signature_count -gt 0 ]]; then
             cat "$temp_signature_only" >> "$unchanged_output"
         fi
 
-        echo "$signature_count" # Output the count for the main script
+        echo "$signature_count"
     fi
 }
 
@@ -526,7 +494,7 @@ analyze_modification_patterns() {
     rm -f "$temp_analysis" "$temp_dirs" "$temp_types"
 }
 
-# New function to generate a focused, human-readable report for critical directories
+# New function to generate a focused, graphical report for critical directories
 generate_deep_dive_report() {
     local output_file="$1"
 
@@ -536,61 +504,75 @@ generate_deep_dive_report() {
         echo "======================================================="
         echo " DETECTIVE DEEP DIVE ANALYSIS REPORT"
         echo "======================================================="
-        echo "This report provides a focused breakdown of changes within user-defined critical directories."
+        echo "This report provides a focused, table-based breakdown of changes within user-defined critical directories."
         echo
 
         for crit_dir in $CRITICAL_DIRECTORIES; do
             # Ensure the directory path ends with a slash for more precise matching
             [[ "$crit_dir" != */ ]] && crit_dir="$crit_dir/"
 
-            echo "-------------------------------------------------------"
-            echo "--- Analysis for Directory: $crit_dir"
-            echo "-------------------------------------------------------"
-            echo
+            echo "--------------------------------------------------------------------------------"
+            printf "ANALYSIS FOR: %s\n" "$crit_dir"
+            echo "--------------------------------------------------------------------------------"
 
-            # --- Replaced Files ---
-            if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
-                echo "--- [REPLACED] with Target Stock's version ---"
-                grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" | sort || echo "  (None)"
-                echo
-            fi
+            # Create temporary filtered lists for the current directory
+            grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" > "$TEMP_DIR/dd_replaced.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" > "$TEMP_DIR/dd_added_stock.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" > "$TEMP_DIR/dd_official_updates.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/dd_changed.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" > "$TEMP_DIR/dd_new.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" > "$TEMP_DIR/dd_deleted.list"
 
-            # --- Added Files from Stock ---
-            if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
-                echo "--- [ADDED] from Target Stock (did not exist in Base) ---"
-                grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" | sort || echo "  (None)"
-                echo
-            fi
+            # Use awk to create a perfectly formatted table
+            awk '
+            BEGIN {
+                # Define column widths and headers
+                W1=40; W2=40; W3=40;
+                HEADER_FMT = "%-" W1 "s | %-" W2 "s | %-" W3 "s\n";
+                ROW_FMT = "%-" W1 "s | %-" W2 "s | %-" W3 "s\n";
+                SEPARATOR = "------------------------------------------------------------------------------------------------------------------------\n";
+                
+                # Load all data into arrays
+                while ((getline < ARGV[1]) > 0) replaced[++r] = $0;
+                while ((getline < ARGV[2]) > 0) added_stock[++as] = $0;
+                while ((getline < ARGV[3]) > 0) official_updates[++ou] = $0;
+                while ((getline < ARGV[4]) > 0) changed[++c] = $0;
+                while ((getline < ARGV[5]) > 0) new_unknown[++nu] = $0;
+                while ((getline < ARGV[6]) > 0) deleted[++d] = $0;
 
-            # --- Official APK Updates ---
-            if [[ -f "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" ]]; then
-                echo "--- [OFFICIAL UPDATES] (Same signature, different hash) ---"
-                grep "^$crit_dir" "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" | sort || echo "  (None)"
-                echo
-            fi
-
-            # --- Changed Files ---
-            echo "--- [CHANGED] by manual edit/unknown source ---"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" | sort || echo "  (None)"
-            echo
-
-            # --- New Files of Unknown Origin ---
-            echo "--- [NEW] files of unknown origin ---"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" | sort || echo "  (None)"
-            echo
-            
-            # --- Deleted Files ---
-            echo "--- [DELETED] from Base ROM ---"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" | sort || echo "  (None)"
-            echo
-
-            # --- Unchanged Files ---
-            echo "--- [UNCHANGED] files ---"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" | sort | head -20 || echo "  (List truncated...)"
-            echo
-
+                # Find the maximum number of rows needed
+                max_rows = r;
+                if (as > max_rows) max_rows = as;
+                if (ou > max_rows) max_rows = ou;
+                if (c > max_rows) max_rows = c;
+                if (nu > max_rows) max_rows = nu;
+                if (d > max_rows) max_rows = d;
+            }
+            END {
+                # Print the first table (Replacements, Additions)
+                printf "\n";
+                printf HEADER_FMT, "[REPLACED] w/ Stock Version", "[ADDED] from Stock", "[OFFICIAL UPDATES]";
+                printf SEPARATOR;
+                for (i=1; i<=max_rows; i++) {
+                    printf ROW_FMT, (i<=r ? basename(replaced[i]) : ""), (i<=as ? basename(added_stock[i]) : ""), (i<=ou ? basename(official_updates[i]) : "");
+                }
+                
+                # Print the second table (Modifications, Deletions)
+                printf "\n\n";
+                printf HEADER_FMT, "[CHANGED] by Porter", "[NEW] (Unknown Origin)", "[DELETED] from Base";
+                printf SEPARATOR;
+                for (i=1; i<=max_rows; i++) {
+                    printf ROW_FMT, (i<=c ? basename(changed[i]) : ""), (i<=nu ? basename(new_unknown[i]) : ""), (i<=d ? basename(deleted[i]) : "");
+                }
+                printf "\n";
+            }
+            function basename(path) {
+                sub(/.*\//, "", path);
+                return path;
+            }
+            ' "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_official_updates.list" \
+              "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
         done
-
     } > "$output_file"
 }
 
@@ -694,10 +676,10 @@ analyze_file() {
 print_banner
 check_root
 check_and_install_deps
-check_and_create_config
 check_and_install_apktool
 check_and_install_apksigner
 
+check_and_create_config
 source "./$CONFIG_FILE"
 
 # --- Phase 1: Initialization ---
@@ -732,6 +714,13 @@ else
     echo -e "\nMode: Dual-Compare"
 fi
 
+# --- Timer Start ---
+start_time=$SECONDS
+
+# --- Phase 2: Hash Generation and Comparison ---
+echo
+echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
+
 # Setup output environment
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 DEFAULT_FOLDER_NAME="final_detective_folder_$TIMESTAMP"
@@ -748,13 +737,6 @@ fi
 PATCHES_DIR="$OUTPUT_DIR/patches"
 RAW_LISTS_DIR="$OUTPUT_DIR/raw_file_lists"
 TEMP_DIR="$OUTPUT_DIR/temp"
-
-# --- Timer Start ---
-start_time=$SECONDS
-
-# --- Phase 2: Hash Generation and Comparison ---
-echo
-echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
 
 # Create all necessary directories and files *before* starting analysis
 mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
@@ -812,10 +794,11 @@ if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
     > "$temp_real_changes"
     > "$temp_official_updates"
     
-    total_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt")
+    total_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)
     current_apk=0
     
     while IFS= read -r filepath; do
+        # We only care about APKs in this filter
         if [[ "$filepath" == *.apk ]]; then
             ((current_apk++))
             printf "\r -> Checking APK signature %d of %d: %-50s" "$current_apk" "$total_apks" "$(basename "$filepath")" >&2
@@ -826,6 +809,7 @@ if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
                 echo "$filepath" >> "$temp_official_updates"
             fi
         else
+            # Pass non-APK files through without checking
             echo "$filepath" >> "$temp_real_changes"
         fi
     done < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
@@ -888,15 +872,12 @@ echo "File comparison complete."
 # Print summary of findings
 echo
 echo -e "${YELLOW}--- Comparison Summary ---${RESET}"
-
 if [[ "$ENABLE_APK_SIGNATURE_FILTER" == "true" ]]; then
     porter_modified_apks=$(grep -c '\.apk$' "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)
     echo "Porter modified APKs: $porter_modified_apks (will be deep scanned)"
     echo "Official APK updates: $(wc -l < "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" 2>/dev/null || echo 0) (skipped deep scan)"
 fi
-
 echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null || echo 0)"
-
 if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -n "$SIGNATURE_COUNT" && "$SIGNATURE_COUNT" -gt 0 ]]; then
     echo -e "${BOLD}Ignored Watermarked files:${RESET} $SIGNATURE_COUNT (moved to unchanged list)"
 fi
@@ -929,7 +910,7 @@ else
 fi
 
 echo "Generating modification patterns analysis..."
-analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
+analyze_modification_patterns "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$PATCHES_DIR" "$OUTPUT_DIR/Porting_Intelligence_Report.txt"
 
 # Generate the new Deep Dive report
 generate_deep_dive_report "$OUTPUT_DIR/Deep_Dive_Analysis.txt"
