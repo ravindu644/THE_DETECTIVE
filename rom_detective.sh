@@ -517,62 +517,97 @@ generate_deep_dive_report() {
             echo "--------------------------------------------------------------------------------"
 
             # Create temporary filtered lists for the current directory
-            grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" > "$TEMP_DIR/dd_replaced.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" > "$TEMP_DIR/dd_added_stock.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/08_OFFICIAL_UPDATES.txt" > "$TEMP_DIR/dd_official_updates.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/dd_changed.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" > "$TEMP_DIR/dd_new.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" > "$TEMP_DIR/dd_deleted.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" > "$TEMP_DIR/dd_replaced.list" 2>/dev/null || touch "$TEMP_DIR/dd_replaced.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" > "$TEMP_DIR/dd_added_stock.list" 2>/dev/null || touch "$TEMP_DIR/dd_added_stock.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/dd_changed.list" 2>/dev/null || touch "$TEMP_DIR/dd_changed.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" > "$TEMP_DIR/dd_new.list" 2>/dev/null || touch "$TEMP_DIR/dd_new.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" > "$TEMP_DIR/dd_deleted.list" 2>/dev/null || touch "$TEMP_DIR/dd_deleted.list"
 
-            # Use awk to create a perfectly formatted table
+            # Check if any of the lists have content
+            local has_data=false
+            for list_file in "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"; do
+                if [[ -s "$list_file" ]]; then
+                    has_data=true
+                    break
+                fi
+            done
+
+            if [[ "$has_data" == "false" ]]; then
+                echo "No changes detected in this directory."
+                echo
+                continue
+            fi
+
+            # Generate flexible table using a more robust approach
             awk '
             BEGIN {
-                # Define column widths and headers
-                W1=40; W2=40; W3=40;
-                HEADER_FMT = "%-" W1 "s | %-" W2 "s | %-" W3 "s\n";
-                ROW_FMT = "%-" W1 "s | %-" W2 "s | %-" W3 "s\n";
-                SEPARATOR = "------------------------------------------------------------------------------------------------------------------------\n";
+                # Column widths
+                COL_WIDTH = 35
+                SEPARATOR_WIDTH = COL_WIDTH * 5 + 16  # 5 columns + separators
                 
-                # Load all data into arrays
-                while ((getline < ARGV[1]) > 0) replaced[++r] = $0;
-                while ((getline < ARGV[2]) > 0) added_stock[++as] = $0;
-                while ((getline < ARGV[3]) > 0) official_updates[++ou] = $0;
-                while ((getline < ARGV[4]) > 0) changed[++c] = $0;
-                while ((getline < ARGV[5]) > 0) new_unknown[++nu] = $0;
-                while ((getline < ARGV[6]) > 0) deleted[++d] = $0;
-
-                # Find the maximum number of rows needed
-                max_rows = r;
-                if (as > max_rows) max_rows = as;
-                if (ou > max_rows) max_rows = ou;
-                if (c > max_rows) max_rows = c;
-                if (nu > max_rows) max_rows = nu;
-                if (d > max_rows) max_rows = d;
+                # Load all data and count non-empty entries
+                while ((getline line < ARGV[1]) > 0) if (line) { replaced[++r_count] = basename(line) }
+                while ((getline line < ARGV[2]) > 0) if (line) { added_stock[++as_count] = basename(line) }
+                while ((getline line < ARGV[3]) > 0) if (line) { changed[++c_count] = basename(line) }
+                while ((getline line < ARGV[4]) > 0) if (line) { new_files[++nf_count] = basename(line) }
+                while ((getline line < ARGV[5]) > 0) if (line) { deleted[++d_count] = basename(line) }
+                
+                # Find maximum rows needed (only count non-empty lists)
+                max_rows = 0
+                if (r_count > max_rows) max_rows = r_count
+                if (as_count > max_rows) max_rows = as_count
+                if (c_count > max_rows) max_rows = c_count
+                if (nf_count > max_rows) max_rows = nf_count
+                if (d_count > max_rows) max_rows = d_count
+                
+                if (max_rows == 0) {
+                    print "No changes detected."
+                    exit
+                }
             }
             END {
-                # Print the first table (Replacements, Additions)
-                printf "\n";
-                printf HEADER_FMT, "[REPLACED] w/ Stock Version", "[ADDED] from Stock", "[OFFICIAL UPDATES]";
-                printf SEPARATOR;
-                for (i=1; i<=max_rows; i++) {
-                    printf ROW_FMT, (i<=r ? basename(replaced[i]) : ""), (i<=as ? basename(added_stock[i]) : ""), (i<=ou ? basename(official_updates[i]) : "");
-                }
+                # Print header
+                printf "\n"
+                printf "%-*s | %-*s | %-*s | %-*s | %-*s\n", 
+                    COL_WIDTH, "[REPLACED] w/ Stock", 
+                    COL_WIDTH, "[ADDED] from Stock", 
+                    COL_WIDTH, "[CHANGED] by Porter", 
+                    COL_WIDTH, "[NEW] Files", 
+                    COL_WIDTH, "[DELETED] Files"
                 
-                # Print the second table (Modifications, Deletions)
-                printf "\n\n";
-                printf HEADER_FMT, "[CHANGED] by Porter", "[NEW] (Unknown Origin)", "[DELETED] from Base";
-                printf SEPARATOR;
-                for (i=1; i<=max_rows; i++) {
-                    printf ROW_FMT, (i<=c ? basename(changed[i]) : ""), (i<=nu ? basename(new_unknown[i]) : ""), (i<=d ? basename(deleted[i]) : "");
+                # Print separator
+                for (i = 0; i < SEPARATOR_WIDTH; i++) printf "-"
+                printf "\n"
+                
+                # Print data rows (only up to max_rows, no empty rows)
+                for (i = 1; i <= max_rows; i++) {
+                    printf "%-*s | %-*s | %-*s | %-*s | %-*s\n",
+                        COL_WIDTH, (i <= r_count ? replaced[i] : ""),
+                        COL_WIDTH, (i <= as_count ? added_stock[i] : ""),
+                        COL_WIDTH, (i <= c_count ? changed[i] : ""),
+                        COL_WIDTH, (i <= nf_count ? new_files[i] : ""),
+                        COL_WIDTH, (i <= d_count ? deleted[i] : "")
                 }
-                printf "\n";
+                printf "\n"
+                
+                # Print summary counts
+                printf "TOTALS: %d replaced, %d added, %d changed, %d new, %d deleted\n\n", 
+                    r_count, as_count, c_count, nf_count, d_count
             }
+            
             function basename(path) {
-                sub(/.*\//, "", path);
-                return path;
+                # Extract filename from full path
+                gsub(/.*\//, "", path)
+                # Truncate if too long
+                if (length(path) > COL_WIDTH - 2) {
+                    path = substr(path, 1, COL_WIDTH - 5) "..."
+                }
+                return path
             }
-            ' "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_official_updates.list" \
-              "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
+            ' "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
+            
+            # Clean up temporary files for this directory
+            rm -f "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
         done
     } > "$output_file"
 }
