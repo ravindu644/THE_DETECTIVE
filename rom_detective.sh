@@ -739,7 +739,7 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
     echo
     echo "Ported ROM: $PORTED_ROM_PATH"
     echo "Base ROM:   $BASE_ROM_PATH"
-    [[ "$ANALYSIS_MODE" == "TRIPLE" ]] && echo "Target ROM: $TARGET_STOCK_PATH"
+    [[ "$ANALYSIS_MODE" == "TRIPLE" ]] && echo "Stock ROM: $TARGET_STOCK_PATH"
     echo "-------------------------------------------------------"
     echo
 
