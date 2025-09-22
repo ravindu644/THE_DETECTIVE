@@ -2,16 +2,15 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.3 (REPLACEMENT DETECTION)
+# Version: 2.4 (STABLE)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# CHANGE LOG (v2.3):
-# - Added new category: "Replaced with Stock" for files nuked from base and replaced with target stock's version.
-# - More reliable hash-based file comparison logic.
-# - Better progress reporting and error handling.
+# CHANGE LOG (v2.4):
+# - Added prompt for custom output folder name.
+# - Fixed bug where hashing would fail if directories didn't exist yet.
 # ==============================================================================
 
 # --- Configuration and Style ---
@@ -28,7 +27,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│        v2.3 - REPLACEMENT DETECTION       │"
+    echo "│            v2.4 - STABLE RELEASE          │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -536,23 +535,17 @@ analyze_file() {
                     hexdump -C "$stock_file" > "$TEMP_DIR/stock.hex" 2>/dev/null
                     hexdump -C "$ported_file" > "$TEMP_DIR/ported.hex" 2>/dev/null
                     diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.hex" "$TEMP_DIR/ported.hex" > "$patch_output_dir/$(basename "$relative_path").hexdump.patch" 2>/dev/null
-
-
                     ;;
                 strings)
                     strings "$stock_file" > "$TEMP_DIR/stock.strings" 2>/dev/null
                     strings "$ported_file" > "$TEMP_DIR/ported.strings" 2>/dev/null
                     diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.strings" "$TEMP_DIR/ported.strings" > "$patch_output_dir/$(basename "$relative_path").strings.patch" 2>/dev/null
-                    diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.elf" "$TEMP_DIR/ported.elf" > "$patch_output_dir/$(basename "$relative_path").dependencies.patch" 2>/dev/null
-
-
                     ;;
                 readelf)
                     if [[ "$mime_type" == "application/x-elf" || "$mime_type" == "application/x-sharedlib" || "$mime_type" == "application/x-executable" ]]; then
                         readelf -d "$stock_file" > "$TEMP_DIR/stock.elf" 2>/dev/null
                         readelf -d "$ported_file" > "$TEMP_DIR/ported.elf" 2>/dev/null
-
-
+                        diff -u --label "$stock_file" --label "$ported_file" "$TEMP_DIR/stock.elf" "$TEMP_DIR/ported.elf" > "$patch_output_dir/$(basename "$relative_path").dependencies.patch" 2>/dev/null
                     fi
                     ;;
             esac
@@ -571,7 +564,7 @@ check_and_create_config
 source "./$CONFIG_FILE"
 
 # --- Phase 1: Initialization ---
-echo -e "--- Phase 1: Initialization ---\n"
+echo -e "\n--- Phase 1: Initialization ---\n"
 # Get user input for directories
 read -e -p "[1/3] Enter the path to the Ported/Modified ROM directory: " PORTED_ROM_PATH
 PORTED_ROM_PATH="${PORTED_ROM_PATH%\'}"; PORTED_ROM_PATH="${PORTED_ROM_PATH#\'}"
@@ -604,14 +597,20 @@ fi
 
 # Setup output environment
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+DEFAULT_FOLDER_NAME="final_detective_folder_$TIMESTAMP"
 SCRIPT_DIR=$(pwd)
-OUTPUT_DIR="$SCRIPT_DIR/final_detective_folder_$TIMESTAMP"
+
+read -e -p "Enter custom output folder name (or press Enter for default: $DEFAULT_FOLDER_NAME): " CUSTOM_FOLDER_NAME
+
+if [[ -z "$CUSTOM_FOLDER_NAME" ]]; then
+    OUTPUT_DIR="$SCRIPT_DIR/$DEFAULT_FOLDER_NAME"
+else
+    OUTPUT_DIR="$SCRIPT_DIR/$CUSTOM_FOLDER_NAME"
+fi
+
 PATCHES_DIR="$OUTPUT_DIR/patches"
 RAW_LISTS_DIR="$OUTPUT_DIR/raw_file_lists"
 TEMP_DIR="$OUTPUT_DIR/temp"
-
-mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
-echo "Results will be saved in: $OUTPUT_DIR"
 
 # --- Timer Start ---
 start_time=$SECONDS
@@ -619,6 +618,17 @@ start_time=$SECONDS
 # --- Phase 2: Hash Generation and Comparison ---
 echo
 echo -e "--- Phase 2: Generating File Hashes (This may take a while...) ---\n"
+
+# Create all necessary directories and files *before* starting analysis
+mkdir -p "$OUTPUT_DIR" "$PATCHES_DIR" "$RAW_LISTS_DIR" "$TEMP_DIR"
+touch "$RAW_LISTS_DIR/01_DELETED_FILES.txt"
+touch "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+touch "$RAW_LISTS_DIR/03_NEW_FILES.txt"
+touch "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
+touch "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt"
+touch "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
+echo "Results will be saved in: $OUTPUT_DIR"
+
 
 # Create ignore options for the find command
 ignore_opts=()
@@ -658,7 +668,6 @@ SIGNATURE_COUNT=$(compare_hash_files \
 if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
     echo -e "\nPerforming Triple-Compare post-analysis for replacements..."
 
-    
     # 1. Find all files that are identical between ported and target (transplanted master list)
     awk '
     FNR==NR {
@@ -771,13 +780,13 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
             cat "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
         fi
         echo
-    fi
 
         echo "--- [ADDED] New Files from Target Stock ROM ---"
         if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
             cat "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
         fi
         echo    
+    fi
 
     echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
     if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
