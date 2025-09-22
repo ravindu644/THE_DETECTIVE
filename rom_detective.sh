@@ -685,6 +685,12 @@ if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
         grep -vxF -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/changed.tmp" && \
         mv "$TEMP_DIR/changed.tmp" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
     fi
+
+    # 5. Clean up the original NEW list by removing the files we just categorized as ADDED from stock
+    if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" && -s "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
+        grep -vxF -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" "$RAW_LISTS_DIR/03_NEW_FILES.txt" > "$TEMP_DIR/new.tmp" && \
+        mv "$TEMP_DIR/new.tmp" "$RAW_LISTS_DIR/03_NEW_FILES.txt"
+    fi
 fi
 
 echo "File comparison complete."
