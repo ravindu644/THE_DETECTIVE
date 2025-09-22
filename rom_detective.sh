@@ -2,14 +2,14 @@
 
 # ==============================================================================
 # The Detective - A Forensic Android ROM Comparison Tool
-# Version: 2.2 (SIMPLIFIED OUTPUT)
+# Version: 2.3 (REPLACEMENT DETECTION)
 # Author: ravindu644
 #
 # This script performs a deep, forensic comparison between two or three
 # unpacked Android ROM directories to identify all modifications.
 #
-# REWRITE NOTES (v2.0):
-# - Eliminated problematic comm/join commands for a pure bash/awk approach.
+# CHANGE LOG (v2.3):
+# - Added new category: "Replaced with Stock" for files nuked from base and replaced with target stock's version.
 # - More reliable hash-based file comparison logic.
 # - Better progress reporting and error handling.
 # ==============================================================================
@@ -28,7 +28,7 @@ print_banner() {
     echo -e "${BOLD}${GREEN}"
     echo "┌───────────────────────────────────────────┐"
     echo "│     The Detective - ROM Analysis Tool     │"
-    echo "│         v2.2 - SIMPLIFIED OUTPUT          │"
+    echo "│        v2.3 - REPLACEMENT DETECTION       │"
     echo "└───────────────────────────────────────────┘"
     echo -e "${RESET}"
 }
@@ -654,9 +654,10 @@ SIGNATURE_COUNT=$(compare_hash_files \
 
 # Handle triple-compare mode for transplanted files
 if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
-    echo -e "\nPerforming Triple-Compare analysis..."
+    echo -e "\nPerforming Triple-Compare post-analysis for replacements..."
+
     
-    # Find files that are identical between ported and target (transplanted)
+    # 1. Find all files that are identical between ported and target (transplanted master list)
     awk '
     FNR==NR {
         # Store ported ROM hashes
@@ -664,7 +665,6 @@ if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
         next
     }
     {
-        # Check target ROM hashes
         filepath = $2
         target_hash = $1
         
@@ -672,7 +672,20 @@ if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
             print filepath
         }
     }
-    ' "$TEMP_DIR/ported.hashes" "$TEMP_DIR/target.hashes" > "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
+
+    ' "$TEMP_DIR/ported.hashes" "$TEMP_DIR/target.hashes" > "$TEMP_DIR/transplanted_master.list"
+
+    # 2. Identify files that were REPLACED (exist in CHANGED and TRANSPLANTED lists)
+    grep -xF -f "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" "$TEMP_DIR/transplanted_master.list" > "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
+
+    # 3. Identify files that were truly ADDED from stock (exist in NEW and TRANSPLANTED lists)
+    grep -xF -f "$RAW_LISTS_DIR/03_NEW_FILES.txt" "$TEMP_DIR/transplanted_master.list" > "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
+
+    # 4. Clean up the original CHANGED list by removing the files we just categorized as REPLACED
+    if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" && -s "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
+        grep -vxF -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/changed.tmp" && \
+        mv "$TEMP_DIR/changed.tmp" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt"
+    fi
 fi
 
 echo "File comparison complete."
@@ -684,12 +697,13 @@ echo "Changed files: $(wc -l < "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null
 if [[ "$FILTER_SIGNATURE_ONLY_CHANGES" == "true" && -n "$SIGNATURE_COUNT" && "$SIGNATURE_COUNT" -gt 0 ]]; then
     echo -e "${BOLD}Ignored Watermarked files:${RESET} $SIGNATURE_COUNT (moved to unchanged list)"
 fi
+if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
+    echo "Replaced with stock files: $(wc -l < "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" 2>/dev/null || echo 0)"
+    echo "Added from stock files: $(wc -l < "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" 2>/dev/null || echo 0)"
+fi
 echo "New files: $(wc -l < "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null || echo 0)"
 echo "Deleted files: $(wc -l < "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null || echo 0)"
 echo "Unchanged files: $(wc -l < "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" 2>/dev/null || echo 0)"
-if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
-    echo "Transplanted files: $(wc -l < "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" 2>/dev/null || echo 0)"
-fi
 
 # --- Phase 3: Deep Analysis ---
 echo
@@ -744,12 +758,18 @@ SUMMARY_FILE="$OUTPUT_DIR/Analysis_Summary.txt"
     echo
 
     if [[ "$ANALYSIS_MODE" == "TRIPLE" ]]; then
-        echo "--- [TRANSPLANTED] Files from Target Stock ROM ---"
-        if [[ -f "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt" ]]; then
-            cat "$RAW_LISTS_DIR/04_TRANSPLANTED_FROM_TARGET_STOCK.txt"
+        echo "--- [REPLACED] Base ROM Files with Target Stock Versions ---"
+        if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
+            cat "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt"
         fi
         echo
     fi
+
+        echo "--- [ADDED] New Files from Target Stock ROM ---"
+        if [[ -f "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" ]]; then
+            cat "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt"
+        fi
+        echo    
 
     echo "--- [UNCHANGED] Files (Identical in both ROMs, including watermarked) ---"
     if [[ -f "$RAW_LISTS_DIR/05_UNCHANGED_FILES.txt" ]]; then
