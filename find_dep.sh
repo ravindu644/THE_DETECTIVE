@@ -9,6 +9,7 @@ NC='\033[0m' # No Color
 
 # Global variables
 declare -A PROCESSED_LIBS
+declare -A COPIED_LIBS
 MISSING_DEPS=""
 
 # Function to print colored output
@@ -96,6 +97,9 @@ copy_with_structure() {
     
     # Copy the file
     if cp "$source_file" "$target_path" 2>/dev/null; then
+        # Track copied libraries
+        COPIED_LIBS[$(basename "$source_file")]=1
+        
         # Only print success on the first copy of the main lib
         if [[ $is_main_lib -eq 1 ]]; then
            print_success "Copied main library: $relative_path"
@@ -168,6 +172,50 @@ analyze_dependencies() {
         fi
         
     done <<< "$deps"
+}
+
+# Function to generate references file
+generate_references_file() {
+    local output_root="$1"
+    local extracted_root="$2"
+    local references_file="$output_root/REFERENCES.txt"
+    
+    print_info "Generating references file..."
+    
+    {
+        echo "Library References Report"
+        echo "Generated on: $(date)"
+        echo "========================================"
+        echo
+        
+        # Process only copied libraries
+        for lib_name in "${!COPIED_LIBS[@]}"; do
+            echo "-----------------------------------"
+            echo "References of $lib_name"
+            echo "-----------------------------------"
+            
+            # Find references
+            local found_refs=0
+            while IFS= read -r -d '' file; do
+                [[ "$(basename "$file")" == "$lib_name" ]] && continue
+                local deps=$(get_dependencies "$file" 2>/dev/null)
+                if [[ -n "$deps" ]] && echo "$deps" | grep -q "^$lib_name$"; then
+                    local relative_path=$(realpath --relative-to="$extracted_root" "$file")
+                    echo "./$relative_path"
+                    found_refs=1
+                fi
+            done < <(find "$extracted_root" -type f \( -executable -o -name "*.so*" \) -print0 2>/dev/null)
+            
+            [[ $found_refs -eq 0 ]] && echo "No references found"
+            echo
+        done
+        
+        echo "========================================"
+        echo "End of References Report"
+        
+    } > "$references_file"
+    
+    print_success "References file saved to: $references_file"
 }
 
 # Main function
@@ -258,6 +306,16 @@ main() {
     print_success "Dependency analysis completed!"
     echo
     
+    # Ask if user wants references analysis
+    read -p "Do you want to deep analyze for the references? (y/N): " analyze_refs
+    if [[ "$analyze_refs" =~ ^[Yy]$ ]]; then
+        generate_references_file "$output_root" "$extracted_root"
+        echo
+    else
+        print_info "Skipping references analysis."
+        echo
+    fi
+    
     # --- Generate Tree Output ---
     print_info "Summary of copied files:"
     local found_libs_file="$output_root/found_libs_tree.txt"
@@ -286,6 +344,9 @@ main() {
     
     echo
     print_info "Operation finished. All files are in: $output_root"
+    if [[ "$analyze_refs" =~ ^[Yy]$ ]]; then
+        print_info "Check REFERENCES.txt for library usage information"
+    fi
 }
 
 # Run main function
