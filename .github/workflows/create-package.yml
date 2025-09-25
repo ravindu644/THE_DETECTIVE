@@ -1,0 +1,118 @@
+# .github/workflows/package-release.yml
+
+name: Package and Release Detective Suite
+
+# Hard-coded URLs for easy maintenance and visibility
+env:
+  APKTOOL_WRAPPER_URL: "https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool"
+  APKTOOL_JAR_URL: "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar"
+  CMDLINE_TOOLS_URL: "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release Version (e.g., v2.6)'
+        required: true
+        default: 'v2.6'
+
+jobs:
+  # Job 1: Package the external binaries
+  package-binaries:
+    runs-on: ubuntu-latest
+    outputs:
+      zip_name: ${{ steps.set_zip_name.outputs.name }}
+    steps:
+      - name: Set Zip Filename
+        id: set_zip_name
+        run: echo "name=detective-binaries-${{ github.event.inputs.version }}.zip" >> $GITHUB_OUTPUT
+
+      - name: Create Staging Directory
+        run: mkdir -p external_binaries/sdk/cmdline-tools
+
+      - name: Download and Prepare Binaries
+        run: |
+          echo "Downloading Apktool..."
+          wget -q -O external_binaries/apktool "${{ env.APKTOOL_WRAPPER_URL }}"
+          wget -q -O external_binaries/apktool.jar "${{ env.APKTOOL_JAR_URL }}"
+          chmod +x external_binaries/apktool external_binaries/apktool.jar
+          
+          echo "Downloading Android command-line tools..."
+          wget -q -O cmdline-tools.zip "${{ env.CMDLINE_TOOLS_URL }}"
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools external_binaries/sdk/cmdline-tools/latest
+          
+          echo "Installing Android build-tools;34.0.0..."
+          export ANDROID_SDK_ROOT=${{ github.workspace }}/external_binaries/sdk
+          yes | external_binaries/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses > /dev/null
+          external_binaries/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} "build-tools;34.0.0" > /dev/null
+
+      - name: Create Binaries Zip Archive
+        run: |
+          cd external_binaries
+          zip -r -9 "../${{ steps.set_zip_name.outputs.name }}" .
+      
+      - name: Upload Binaries Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-package
+          path: ${{ steps.set_zip_name.outputs.name }}
+
+  # Job 2: Package the main script and config file
+  package-script:
+    runs-on: ubuntu-latest
+    outputs:
+      zip_name: ${{ steps.set_zip_name.outputs.name }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Zip Filename
+        id: set_zip_name
+        run: echo "name=The_Detective_Script_${{ github.event.inputs.version }}.zip" >> $GITHUB_OUTPUT
+
+      - name: Create Script Zip Archive
+        run: rm -rf .git* ; zip -r -9 "${{ steps.set_zip_name.outputs.name }}" rom_detective.sh detective.conf
+
+      - name: Upload Script Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: script-package
+          path: ${{ steps.set_zip_name.outputs.name }}
+
+  # Job 3: Create the final release after the other jobs complete
+  create-release:
+    runs-on: ubuntu-latest
+    # This 'needs' directive ensures this job only runs after both packaging jobs succeed
+    needs: [package-binaries, package-script]
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          # No specific name, so it downloads all artifacts
+
+      - name: List downloaded files for debugging
+        run: ls -R release-assets
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          # This glob pattern finds both zip files in their respective downloaded artifact folders
+          artifacts: "release-assets/*/*.zip"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.event.inputs.version }}
+          name: "The ROM Detective ${{ github.event.inputs.version }} (Full Suite)"
+          body: |
+            This is a full release containing the main script and all required external binaries.
+            
+            ### Attached Files:
+            
+            *   `The_Detective_Script_${{ github.event.inputs.version }}.zip`: Contains `rom_detective.sh` and `detective.conf`.
+            *   `detective-binaries-${{ github.event.inputs.version }}.zip`: Contains `apktool` and `apksigner` (from Android Build-Tools v34.0.0).
+            
+            ### How to Use:
+            1. Download both zip files.
+            2. Extract the script zip.
+            3. Extract the binaries zip and ensure its contents are in your system's PATH or the Script will auto install in the first run.
+            4. Run the script: `sudo ./rom_detective.sh`
