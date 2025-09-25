@@ -20,8 +20,6 @@ jobs:
   # Job 1: Package the external binaries
   package-binaries:
     runs-on: ubuntu-latest
-    outputs:
-      zip_name: ${{ steps.set_zip_name.outputs.name }}
     steps:
       - name: Set Zip Filename
         id: set_zip_name
@@ -61,8 +59,6 @@ jobs:
   # Job 2: Package the main script and config file
   package-script:
     runs-on: ubuntu-latest
-    outputs:
-      zip_name: ${{ steps.set_zip_name.outputs.name }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -83,14 +79,15 @@ jobs:
   # Job 3: Create the final release after the other jobs complete
   create-release:
     runs-on: ubuntu-latest
-    # This 'needs' directive ensures this job only runs after both packaging jobs succeed
     needs: [package-binaries, package-script]
+    permissions:
+      contents: write
+
     steps:
       - name: Download all packages
         uses: actions/download-artifact@v4
         with:
           path: release-assets
-          # No specific name, so it downloads all artifacts
 
       - name: List downloaded files for debugging
         run: ls -R release-assets
@@ -98,7 +95,6 @@ jobs:
       - name: Create GitHub Release
         uses: ncipollo/release-action@v1
         with:
-          # This glob pattern finds both zip files in their respective downloaded artifact folders
           artifacts: "release-assets/*/*.zip"
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.event.inputs.version }}
