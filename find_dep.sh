@@ -84,10 +84,18 @@ copy_with_structure() {
     local source_file="$1"
     local extracted_root="$2"
     local output_root="$3"
+    local is_reference="${4:-false}"  # New parameter to identify if copying a reference
     
     # Get relative path from extracted root
     local relative_path=$(realpath --relative-to="$extracted_root" "$source_file")
-    local target_path="$output_root/$relative_path"
+    local target_path
+    
+    if [[ "$is_reference" == "true" ]]; then
+        target_path="$output_root/REFERENCES/$relative_path"
+    else
+        target_path="$output_root/$relative_path"
+    fi
+    
     local target_dir=$(dirname "$target_path")
     
     # Create target directory if it doesn't exist
@@ -124,7 +132,7 @@ add_missing_dep() {
 update_status() {
     local status="$1"
     CURRENT_STATUS="$status"
-    echo -en "\r\033[K[INFO] $status"  # Clear line and show new status
+    echo -en "\r\033[K${BLUE}[INFO]${NC} $status"  # Added color to [INFO]
 }
 
 # Function to finalize status (move to next line)
@@ -170,10 +178,13 @@ analyze_dependencies() {
 generate_references_file() {
     local output_root="$1"
     local extracted_root="$2"
-    local references_file="$output_root/REFERENCES.txt"
+    local refs_dir="$output_root/REFERENCES"
+    local references_file="$refs_dir/REFERENCES.txt"
     local total_libs=${#COPIED_LIBS[@]}
     local current_lib=0
     
+    # Create REFERENCES directory
+    mkdir -p "$refs_dir"
     print_info "Starting deep analysis..."
     
     # Start file with headers
@@ -203,6 +214,8 @@ generate_references_file() {
             if [[ -n "$deps" ]] && echo "$deps" | grep -q "^$lib_name$"; then
                 local relative_path=$(realpath --relative-to="$extracted_root" "$file")
                 echo "./$relative_path" >> "$references_file"
+                # Copy the reference to REFERENCES folder
+                copy_with_structure "$file" "$extracted_root" "$output_root" "true"
                 found_refs=1
             fi
         done < <(find "$extracted_root" -type f \( -executable -o -name "*.so*" \) -print0 2>/dev/null)
@@ -219,6 +232,58 @@ generate_references_file() {
     
     finalize_status
     print_success "References analysis completed! File saved to: $references_file"
+}
+
+# Function to select libraries for deep analysis
+select_libs_for_analysis() {
+    local -n libs=$1  # Reference to COPIED_LIBS array
+    
+    if ! command_exists whiptail; then
+        print_warning "whiptail not found. Proceeding with all libraries."
+        return 0
+    fi
+    
+    # Save terminal state
+    tput smcup
+    
+    # Create checklist items
+    local items=()
+    local i=1
+    for lib_name in "${!libs[@]}"; do
+        items+=("$lib_name" "" "ON")
+    done
+    
+    # Show checklist dialog with proper terminal handling
+    local selected_libs
+    selected_libs=$(TERM=ansi whiptail --title "Select Libraries for Deep Analysis" \
+        --checklist "Space to toggle, Enter to confirm" \
+        $(($(tput lines) - 8)) $(($(tput cols) - 20)) $((${#libs[@]} + 2)) \
+        "${items[@]}" \
+        3>&1 1>&2 2>&3)
+    local return_code=$?
+    
+    # Restore terminal state
+    tput rmcup
+    
+    # Handle selection
+    if [[ $return_code -ne 0 ]]; then
+        print_warning "Selection cancelled. Skipping deep analysis."
+        return 1
+    fi
+    
+    # Create temporary array
+    declare -A selected
+    for lib in $selected_libs; do
+        lib=$(echo "$lib" | tr -d '"')  # Remove quotes
+        selected["$lib"]=1
+    done
+    
+    # Filter out unselected libraries
+    for lib in "${!libs[@]}"; do
+        [[ -z "${selected[$lib]}" ]] && unset libs["$lib"]
+    done
+    
+    return 0
 }
 
 # Main function
@@ -316,7 +381,24 @@ main() {
     # Ask if user wants references analysis
     read -p "Do you want to deep analyze for the references? (y/N): " analyze_refs
     if [[ "$analyze_refs" =~ ^[Yy]$ ]]; then
-        generate_references_file "$output_root" "$extracted_root"
+        # Create a copy of COPIED_LIBS for selection
+        declare -A SELECTED_LIBS
+        for k in "${!COPIED_LIBS[@]}"; do
+            SELECTED_LIBS[$k]=${COPIED_LIBS[$k]}
+        done
+        
+        if select_libs_for_analysis SELECTED_LIBS; then
+            if [[ ${#SELECTED_LIBS[@]} -gt 0 ]]; then
+                # Use SELECTED_LIBS instead of COPIED_LIBS for analysis
+                COPIED_LIBS=()
+                for k in "${!SELECTED_LIBS[@]}"; do
+                    COPIED_LIBS[$k]=${SELECTED_LIBS[$k]}
+                done
+                generate_references_file "$output_root" "$extracted_root"
+            else
+                print_warning "No libraries selected for analysis."
+            fi
+        fi
         echo
     else
         print_info "Skipping references analysis."
