@@ -12,6 +12,11 @@ declare -A PROCESSED_LIBS
 declare -A COPIED_LIBS
 MISSING_DEPS=""
 
+# Additional global variables for statistics
+TOTAL_LIBS_FOUND=0
+TOTAL_DEPS_PROCESSED=0
+CURRENT_STATUS=""
+
 # Function to print colored output
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -53,20 +58,13 @@ clean_path() {
     echo "$input"
 }
 
-# Function to find a library file in the extracted image
+# Function to find all instances of a library file in the extracted image
 find_library() {
     local lib_name="$1"
     local search_path="$2"
     
-    # Search for the library in common directories
-    local found_lib=$(find "$search_path" -type f -name "$lib_name" 2>/dev/null | head -1)
-    
-    if [[ -n "$found_lib" ]]; then
-        echo "$found_lib"
-        return 0
-    fi
-    
-    return 1
+    # Search for all instances of the library
+    find "$search_path" -type f -name "$lib_name" 2>/dev/null
 }
 
 # Function to get dependencies of a library
@@ -122,6 +120,18 @@ add_missing_dep() {
     fi
 }
 
+# Function to update status line
+update_status() {
+    local status="$1"
+    CURRENT_STATUS="$status"
+    echo -en "\r\033[K[INFO] $status"  # Clear line and show new status
+}
+
+# Function to finalize status (move to next line)
+finalize_status() {
+    [[ -n "$CURRENT_STATUS" ]] && echo
+}
+
 # Function to analyze dependencies recursively
 analyze_dependencies() {
     local lib_file="$1"
@@ -129,48 +139,30 @@ analyze_dependencies() {
     local output_root="$3"
     local depth="$4"
     
-    # Create indentation for visual hierarchy
-    local indent=""
-    for ((i=0; i<depth; i++)); do
-        indent+="  "
-    done
+    local lib_name=$(basename "$lib_file")
+    update_status "Analyzing: $lib_name (Total processed: $TOTAL_DEPS_PROCESSED)"
     
-    print_info "${indent}Analyzing: $(basename "$lib_file")"
-    
-    # Get dependencies of current library
     local deps=$(get_dependencies "$lib_file")
+    [[ -z "$deps" ]] && return 0
     
-    if [[ -z "$deps" ]]; then
-        return 0
-    fi
-    
-    # Process each dependency
     while IFS= read -r dep; do
         [[ -z "$dep" ]] && continue
+        [[ -n "${PROCESSED_LIBS[$dep]}" ]] && continue
         
-        # Skip if already processed
-        if [[ -n "${PROCESSED_LIBS[$dep]}" ]]; then
-            continue
-        fi
-        
-        # Mark as processed immediately to handle cyclic dependencies
         PROCESSED_LIBS["$dep"]=1
-
-        # Find the dependency in the extracted image
-        local dep_path=$(find_library "$dep" "$extracted_root")
+        local dep_paths=($(find_library "$dep" "$extracted_root"))
         
-        if [[ -n "$dep_path" ]]; then
-            print_info "${indent}→ Found '$dep', copying and analyzing..."
-            # Copy the dependency with proper structure
-            copy_with_structure "$dep_path" "$extracted_root" "$output_root"
+        if [[ ${#dep_paths[@]} -gt 0 ]]; then
+            ((TOTAL_LIBS_FOUND+=${#dep_paths[@]}))
+            ((TOTAL_DEPS_PROCESSED++))
             
-            # Recursively analyze dependencies of this dependency
-            analyze_dependencies "$dep_path" "$extracted_root" "$output_root" $((depth + 1))
+            for dep_path in "${dep_paths[@]}"; do
+                copy_with_structure "$dep_path" "$extracted_root" "$output_root"
+                analyze_dependencies "$dep_path" "$extracted_root" "$output_root" $((depth + 1))
+            done
         else
-            # Add to missing dependencies list silently
             add_missing_dep "$dep"
         fi
-        
     done <<< "$deps"
 }
 
@@ -179,43 +171,54 @@ generate_references_file() {
     local output_root="$1"
     local extracted_root="$2"
     local references_file="$output_root/REFERENCES.txt"
+    local total_libs=${#COPIED_LIBS[@]}
+    local current_lib=0
     
-    print_info "Generating references file..."
+    print_info "Starting deep analysis..."
     
+    # Start file with headers
     {
         echo "Library References Report"
         echo "Generated on: $(date)"
         echo "========================================"
         echo
+    } > "$references_file"
+    
+    # Process each library
+    for lib_name in "${!COPIED_LIBS[@]}"; do
+        ((current_lib++))
+        update_status "Analyzing references: $lib_name ($current_lib of $total_libs)"
         
-        # Process only copied libraries
-        for lib_name in "${!COPIED_LIBS[@]}"; do
+        {
             echo "-----------------------------------"
             echo "References of $lib_name"
             echo "-----------------------------------"
-            
-            # Find references
-            local found_refs=0
-            while IFS= read -r -d '' file; do
-                [[ "$(basename "$file")" == "$lib_name" ]] && continue
-                local deps=$(get_dependencies "$file" 2>/dev/null)
-                if [[ -n "$deps" ]] && echo "$deps" | grep -q "^$lib_name$"; then
-                    local relative_path=$(realpath --relative-to="$extracted_root" "$file")
-                    echo "./$relative_path"
-                    found_refs=1
-                fi
-            done < <(find "$extracted_root" -type f \( -executable -o -name "*.so*" \) -print0 2>/dev/null)
-            
-            [[ $found_refs -eq 0 ]] && echo "No references found"
-            echo
-        done
+        } >> "$references_file"
         
+        # Find references
+        local found_refs=0
+        while IFS= read -r -d '' file; do
+            [[ "$(basename "$file")" == "$lib_name" ]] && continue
+            local deps=$(get_dependencies "$file" 2>/dev/null)
+            if [[ -n "$deps" ]] && echo "$deps" | grep -q "^$lib_name$"; then
+                local relative_path=$(realpath --relative-to="$extracted_root" "$file")
+                echo "./$relative_path" >> "$references_file"
+                found_refs=1
+            fi
+        done < <(find "$extracted_root" -type f \( -executable -o -name "*.so*" \) -print0 2>/dev/null)
+        
+        [[ $found_refs -eq 0 ]] && echo "No references found" >> "$references_file"
+        echo >> "$references_file"
+    done
+    
+    # Add footer to file
+    {
         echo "========================================"
         echo "End of References Report"
-        
-    } > "$references_file"
+    } >> "$references_file"
     
-    print_success "References file saved to: $references_file"
+    finalize_status
+    print_success "References analysis completed! File saved to: $references_file"
 }
 
 # Main function
@@ -300,10 +303,14 @@ main() {
     PROCESSED_LIBS[$(basename "$lib_file")]=1
     
     # Start recursive dependency analysis
+    ((TOTAL_LIBS_FOUND++))
     analyze_dependencies "$lib_file" "$extracted_root" "$output_root" 0
+    finalize_status
     
     echo
     print_success "Dependency analysis completed!"
+    print_info "Total libraries processed: $TOTAL_DEPS_PROCESSED"
+    print_info "Total library instances found: $TOTAL_LIBS_FOUND"
     echo
     
     # Ask if user wants references analysis
