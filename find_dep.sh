@@ -286,18 +286,63 @@ select_libs_for_analysis() {
     return 0
 }
 
+# Function to check if system is Debian/Ubuntu based
+is_debian_based() {
+    [[ -f /etc/debian_version ]] || command -v apt-get >/dev/null 2>&1
+}
+
+# Function to check and install required commands (maps command -> package)
+check_and_install_commands() {
+    declare -A cmd_pkg=(
+        ["objdump"]="binutils"
+        ["tree"]="tree"
+        ["whiptail"]="whiptail"
+    )
+    local missing_pkgs=()
+    for cmd in "${!cmd_pkg[@]}"; do
+        if ! command_exists "$cmd"; then
+            missing_pkgs+=("${cmd_pkg[$cmd]}")
+        fi
+    done
+    if [ ${#missing_pkgs[@]} -eq 0 ]; then
+        return 0
+    fi
+    # Deduplicate
+    local unique_pkgs
+    unique_pkgs=$(printf "%s\n" "${missing_pkgs[@]}" | sort -u | tr '\n' ' ')
+    print_warning "Some required packages are missing: $unique_pkgs"
+    read -p "Do you want to install them? (y/N): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        print_info "Installing missing packages..."
+        if sudo apt-get update && sudo apt-get install -y $unique_pkgs; then
+            print_success "Successfully installed required packages!"
+        else
+            print_error "Failed to install some packages. Script may not work as expected."
+        fi
+    else
+        print_warning "Proceeding without installing packages. Some features may not work."
+    fi
+}
+
 # Main function
 main() {
     print_info "Library Dependency Analyzer"
     print_info "================================"
     echo
-    
+
+    # Check and install required commands/packages on Debian/Ubuntu
+    if is_debian_based; then
+        check_and_install_commands
+    else
+        print_warning "Not a Debian/Ubuntu based system. Please ensure required packages are installed manually."
+    fi
+
     # Check required commands
     if ! command_exists objdump; then
         print_error "objdump command not found. Please install binutils package."
         exit 1
     fi
-    
+
     # Get input library file
     while true; do
         read -p "Enter the path to the library file: " lib_file_input
