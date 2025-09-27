@@ -182,54 +182,78 @@ generate_references_file() {
     local references_file="$refs_dir/REFERENCES.txt"
     local total_libs=${#COPIED_LIBS[@]}
     local current_lib=0
-    
-    # Create REFERENCES directory
+
     mkdir -p "$refs_dir"
-    print_info "Starting deep analysis..."
-    
-    # Start file with headers
+    print_info "Starting deep analysis (fast mode)..."
+
+    # --- Optimization: Build dependency map in one pass ---
+    declare -A FILE_DEPS
+    declare -A LIB_REFERENCES
+
+    print_info "Indexing all ELF/shared object dependencies..."
+    # Find all candidate files and extract their dependencies in parallel
+    mapfile -t all_files < <(find "$extracted_root" -type f \( -executable -o -name "*.so*" \) 2>/dev/null)
+
+    # Use GNU Parallel if available, else fallback to background jobs
+    if command_exists parallel; then
+        parallel --halt soon,fail=1 --jobs 0 '
+            deps=$(objdump -p {} 2>/dev/null | grep -i "NEEDED" | awk "{print \$2}" | sort -u | tr "\n" " ")
+            [ -n "$deps" ] && echo "{}:$deps"
+        ' ::: "${all_files[@]}" > "$refs_dir/.deps_map"
+    else
+        > "$refs_dir/.deps_map"
+        for file in "${all_files[@]}"; do
+            (
+                deps=$(objdump -p "$file" 2>/dev/null | grep -i "NEEDED" | awk '{print $2}' | sort -u | tr '\n' ' ')
+                [ -n "$deps" ] && echo "$file:$deps"
+            ) >> "$refs_dir/.deps_map" &
+        done
+        wait
+    fi
+
+    # Build FILE_DEPS and LIB_REFERENCES maps
+    while IFS=: read -r file deps; do
+        FILE_DEPS["$file"]="$deps"
+        for dep in $deps; do
+            LIB_REFERENCES["$dep"]+="$file "
+        done
+    done < "$refs_dir/.deps_map"
+
+    # --- Write references report ---
     {
         echo "Library References Report"
         echo "Generated on: $(date)"
         echo "========================================"
         echo
     } > "$references_file"
-    
-    # Process each library
+
     for lib_name in "${!COPIED_LIBS[@]}"; do
         ((current_lib++))
         update_status "Analyzing references: $lib_name ($current_lib of $total_libs)"
-        
         {
             echo "-----------------------------------"
             echo "References of $lib_name"
             echo "-----------------------------------"
         } >> "$references_file"
-        
-        # Find references
+
         local found_refs=0
-        while IFS= read -r -d '' file; do
-            [[ "$(basename "$file")" == "$lib_name" ]] && continue
-            local deps=$(get_dependencies "$file" 2>/dev/null)
-            if [[ -n "$deps" ]] && echo "$deps" | grep -q "^$lib_name$"; then
-                local relative_path=$(realpath --relative-to="$extracted_root" "$file")
-                echo "./$relative_path" >> "$references_file"
-                # Copy the reference to REFERENCES folder
-                copy_with_structure "$file" "$extracted_root" "$output_root" "true"
-                found_refs=1
-            fi
-        done < <(find "$extracted_root" -type f \( -executable -o -name "*.so*" \) -print0 2>/dev/null)
-        
+        for ref_file in ${LIB_REFERENCES["$lib_name"]}; do
+            # Don't reference itself
+            [[ "$(basename "$ref_file")" == "$lib_name" ]] && continue
+            local relative_path=$(realpath --relative-to="$extracted_root" "$ref_file")
+            echo "./$relative_path" >> "$references_file"
+            copy_with_structure "$ref_file" "$extracted_root" "$output_root" "true"
+            found_refs=1
+        done
         [[ $found_refs -eq 0 ]] && echo "No references found" >> "$references_file"
         echo >> "$references_file"
     done
-    
-    # Add footer to file
+
     {
         echo "========================================"
         echo "End of References Report"
     } >> "$references_file"
-    
+
     finalize_status
     print_success "References analysis completed! File saved to: $references_file"
 }
