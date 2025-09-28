@@ -10,6 +10,7 @@ NC='\033[0m' # No Color
 # Global variables
 declare -A PROCESSED_LIBS
 declare -A COPIED_LIBS
+declare -A COPIED_LIBS_PATHS  # Maps library name to array of full paths
 MISSING_DEPS=""
 
 # Additional global variables for statistics
@@ -104,7 +105,15 @@ copy_with_structure() {
     # Copy the file
     if cp "$source_file" "$target_path" 2>/dev/null; then
         # Track copied libraries
-        COPIED_LIBS[$(basename "$source_file")]=1
+        local lib_name=$(basename "$source_file")
+        COPIED_LIBS["$lib_name"]=1
+        
+        # Track all paths for each library name
+        if [[ -z "${COPIED_LIBS_PATHS[$lib_name]}" ]]; then
+            COPIED_LIBS_PATHS["$lib_name"]="$source_file"
+        else
+            COPIED_LIBS_PATHS["$lib_name"]="${COPIED_LIBS_PATHS[$lib_name]}|$source_file"
+        fi
         
         # Only print success on the first copy of the main lib
         if [[ $is_main_lib -eq 1 ]]; then
@@ -174,13 +183,14 @@ analyze_dependencies() {
     done <<< "$deps"
 }
 
-# Function to generate references file
+# Function to generate references file for selected libraries
 generate_references_file() {
     local output_root="$1"
     local extracted_root="$2"
+    local -n selected_libs_ref=$3  # Reference to selected libraries array
     local refs_dir="$output_root/REFERENCES"
     local references_file="$refs_dir/REFERENCES.txt"
-    local total_libs=${#COPIED_LIBS[@]}
+    local total_libs=${#selected_libs_ref[@]}
     local current_lib=0
 
     mkdir -p "$refs_dir"
@@ -227,14 +237,28 @@ generate_references_file() {
         echo
     } > "$references_file"
 
-    for lib_name in "${!COPIED_LIBS[@]}"; do
+    # Process only selected libraries, but copy all variants for each
+    for lib_name in "${!selected_libs_ref[@]}"; do
         ((current_lib++))
         update_status "Analyzing references: $lib_name ($current_lib of $total_libs)"
+        
         {
             echo "-----------------------------------"
             echo "References of $lib_name"
             echo "-----------------------------------"
         } >> "$references_file"
+
+        # Get all paths for this library name
+        local lib_paths_str="${COPIED_LIBS_PATHS[$lib_name]}"
+        IFS='|' read -ra lib_paths <<< "$lib_paths_str"
+        
+        # Show which variants were analyzed
+        echo "Analyzed variants:" >> "$references_file"
+        for lib_path in "${lib_paths[@]}"; do
+            local relative_path=$(realpath --relative-to="$extracted_root" "$lib_path")
+            echo "  - $relative_path" >> "$references_file"
+        done
+        echo >> "$references_file"
 
         local found_refs=0
         for ref_file in ${LIB_REFERENCES["$lib_name"]}; do
@@ -270,18 +294,45 @@ select_libs_for_analysis() {
     # Save terminal state
     tput smcup
     
-    # Create checklist items
+    # Create checklist items (show each library name only once)
     local items=()
-    local i=1
     for lib_name in "${!libs[@]}"; do
-        items+=("$lib_name" "" "ON")
+        # Count how many instances of this library exist
+        local lib_paths_str="${COPIED_LIBS_PATHS[$lib_name]}"
+        local instance_count=$(echo "$lib_paths_str" | tr '|' '\n' | wc -l)
+        
+        if [[ $instance_count -gt 1 ]]; then
+            items+=("$lib_name" "($instance_count instances found)" "ON")
+        else
+            items+=("$lib_name" "" "ON")
+        fi
     done
     
-    # Show checklist dialog with proper terminal handling
+    # Calculate optimal dialog dimensions
+    local term_height=$(tput lines)
+    local term_width=$(tput cols)
+    local num_items=$((${#items[@]} / 3))  # Each item has 3 elements
+    
+    # Calculate dialog dimensions with proper constraints
+    local dialog_width=$((term_width - 10))
+    [[ $dialog_width -lt 60 ]] && dialog_width=60
+    [[ $dialog_width -gt 120 ]] && dialog_width=120
+    
+    local dialog_height=$((term_height - 8))
+    [[ $dialog_height -lt 15 ]] && dialog_height=15
+    [[ $dialog_height -gt 40 ]] && dialog_height=40
+    
+    # Calculate list height (height available for the actual list)
+    # whiptail needs space for title, borders, and buttons
+    local list_height=$((dialog_height - 8))
+    [[ $list_height -lt 5 ]] && list_height=5
+    [[ $list_height -gt $num_items ]] && list_height=$num_items
+    
+    # Show checklist dialog with proper terminal handling and scrolling
     local selected_libs
     selected_libs=$(TERM=ansi whiptail --title "Select Libraries for Deep Analysis" \
-        --checklist "Space to toggle, Enter to confirm" \
-        $(($(tput lines) - 8)) $(($(tput cols) - 20)) $((${#libs[@]} + 2)) \
+        --checklist "Use SPACE to toggle, ENTER to confirm, UP/DOWN arrows to scroll\nAll instances of selected libraries will be analyzed" \
+        $dialog_height $dialog_width $list_height \
         "${items[@]}" \
         3>&1 1>&2 2>&3)
     local return_code=$?
@@ -458,12 +509,7 @@ main() {
         
         if select_libs_for_analysis SELECTED_LIBS; then
             if [[ ${#SELECTED_LIBS[@]} -gt 0 ]]; then
-                # Use SELECTED_LIBS instead of COPIED_LIBS for analysis
-                COPIED_LIBS=()
-                for k in "${!SELECTED_LIBS[@]}"; do
-                    COPIED_LIBS[$k]=${SELECTED_LIBS[$k]}
-                done
-                generate_references_file "$output_root" "$extracted_root"
+                generate_references_file "$output_root" "$extracted_root" SELECTED_LIBS
             else
                 print_warning "No libraries selected for analysis."
             fi
