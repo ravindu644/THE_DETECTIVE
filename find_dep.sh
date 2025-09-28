@@ -294,9 +294,12 @@ select_libs_for_analysis() {
     # Save terminal state
     tput smcup
     
-    # Create checklist items (show each library name only once)
+    # Create sorted array of library names
+    local sorted_libs=($(printf '%s\n' "${!libs[@]}" | sort))
+    
+    # Create checklist items (show each library name only once, sorted alphabetically)
     local items=()
-    for lib_name in "${!libs[@]}"; do
+    for lib_name in "${sorted_libs[@]}"; do
         # Count how many instances of this library exist
         local lib_paths_str="${COPIED_LIBS_PATHS[$lib_name]}"
         local instance_count=$(echo "$lib_paths_str" | tr '|' '\n' | wc -l)
