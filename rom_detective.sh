@@ -599,6 +599,9 @@ generate_deep_dive_report() {
 
     echo "Generating Deep Dive Analysis Report..."
 
+    # Pre-sort and deduplicate all source files to prevent duplicates
+    for list in "$RAW_LISTS_DIR"/*.txt; do [[ -f "$list" ]] && sort -u -o "$list" "$list"; done
+
     {
         echo "======================================================="
         echo " DETECTIVE DEEP DIVE ANALYSIS REPORT"
@@ -615,11 +618,16 @@ generate_deep_dive_report() {
             echo "--------------------------------------------------------------------------------"
 
             # Create temporary filtered lists for the current directory
-            grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" > "$TEMP_DIR/dd_replaced.list" 2>/dev/null || touch "$TEMP_DIR/dd_replaced.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" > "$TEMP_DIR/dd_added_stock.list" 2>/dev/null || touch "$TEMP_DIR/dd_added_stock.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" > "$TEMP_DIR/dd_changed.list" 2>/dev/null || touch "$TEMP_DIR/dd_changed.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" > "$TEMP_DIR/dd_new.list" 2>/dev/null || touch "$TEMP_DIR/dd_new.list"
-            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" > "$TEMP_DIR/dd_deleted.list" 2>/dev/null || touch "$TEMP_DIR/dd_deleted.list"
+            # Use sort -u to eliminate any duplicate entries
+            if [[ -f "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" ]]; then
+                grep "^$crit_dir" "$RAW_LISTS_DIR/07_REPLACED_WITH_STOCK.txt" 2>/dev/null | sort -u > "$TEMP_DIR/dd_replaced.list" || touch "$TEMP_DIR/dd_replaced.list"
+            else
+                touch "$TEMP_DIR/dd_replaced.list"
+            fi
+            grep "^$crit_dir" "$RAW_LISTS_DIR/04_ADDED_FROM_STOCK.txt" 2>/dev/null | sort -u > "$TEMP_DIR/dd_added_stock.list" || touch "$TEMP_DIR/dd_added_stock.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/02_CHANGED_FILES.txt" 2>/dev/null | sort -u > "$TEMP_DIR/dd_changed.list" || touch "$TEMP_DIR/dd_changed.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/03_NEW_FILES.txt" 2>/dev/null | sort -u > "$TEMP_DIR/dd_new.list" || touch "$TEMP_DIR/dd_new.list"
+            grep "^$crit_dir" "$RAW_LISTS_DIR/01_DELETED_FILES.txt" 2>/dev/null | sort -u > "$TEMP_DIR/dd_deleted.list" || touch "$TEMP_DIR/dd_deleted.list"
 
             # Check if any of the lists have content
             local has_data=false
@@ -639,12 +647,12 @@ generate_deep_dive_report() {
             # Generate flexible table using dynamic column widths
             awk '
             BEGIN {
-                # Load all data and count non-empty entries
-                while ((getline line < ARGV[1]) > 0) if (line) { replaced[++r_count] = basename(line) }
-                while ((getline line < ARGV[2]) > 0) if (line) { added_stock[++as_count] = basename(line) }
-                while ((getline line < ARGV[3]) > 0) if (line) { changed[++c_count] = basename(line) }
-                while ((getline line < ARGV[4]) > 0) if (line) { new_files[++nf_count] = basename(line) }
-                while ((getline line < ARGV[5]) > 0) if (line) { deleted[++d_count] = basename(line) }
+                # Load all data with full paths and count non-empty entries
+                while ((getline line < ARGV[1]) > 0) if (line) { replaced[++r_count] = line }
+                while ((getline line < ARGV[2]) > 0) if (line) { added_stock[++as_count] = line }
+                while ((getline line < ARGV[3]) > 0) if (line) { changed[++c_count] = line }
+                while ((getline line < ARGV[4]) > 0) if (line) { new_files[++nf_count] = line }
+                while ((getline line < ARGV[5]) > 0) if (line) { deleted[++d_count] = line }
                 
                 # Find maximum rows needed (only count non-empty lists)
                 max_rows = 0
@@ -659,33 +667,20 @@ generate_deep_dive_report() {
                     exit
                 }
                 
-                # Calculate dynamic column widths based on content
-                col1_width = length("[REPLACED] w/ Stock")
-                col2_width = length("[ADDED] from Stock")
-                col3_width = length("[CHANGED] by Porter")
-                col4_width = length("[NEW] Files")
-                col5_width = length("[DELETED] Files")
+                # Calculate dynamic column widths based on content (full paths, no cap)
+                col1_width = 30
+                col2_width = 30
+                col3_width = 30
+                col4_width = 30
+                col5_width = 30
                 
-                for (i = 1; i <= r_count; i++) if (length(replaced[i]) > col1_width) col1_width = length(replaced[i])
-                for (i = 1; i <= as_count; i++) if (length(added_stock[i]) > col2_width) col2_width = length(added_stock[i])
-                for (i = 1; i <= c_count; i++) if (length(changed[i]) > col3_width) col3_width = length(changed[i])
-                for (i = 1; i <= nf_count; i++) if (length(new_files[i]) > col4_width) col4_width = length(new_files[i])
-                for (i = 1; i <= d_count; i++) if (length(deleted[i]) > col5_width) col5_width = length(deleted[i])
+                for (i = 1; i <= r_count; i++) if (length(replaced[i]) + 2 > col1_width) col1_width = length(replaced[i]) + 2
+                for (i = 1; i <= as_count; i++) if (length(added_stock[i]) + 2 > col2_width) col2_width = length(added_stock[i]) + 2
+                for (i = 1; i <= c_count; i++) if (length(changed[i]) + 2 > col3_width) col3_width = length(changed[i]) + 2
+                for (i = 1; i <= nf_count; i++) if (length(new_files[i]) + 2 > col4_width) col4_width = length(new_files[i]) + 2
+                for (i = 1; i <= d_count; i++) if (length(deleted[i]) + 2 > col5_width) col5_width = length(deleted[i]) + 2
                 
-                # Cap maximum column width to prevent overly wide tables
-                max_col_width = 50
-                if (col1_width > max_col_width) col1_width = max_col_width
-                if (col2_width > max_col_width) col2_width = max_col_width
-                if (col3_width > max_col_width) col3_width = max_col_width
-                if (col4_width > max_col_width) col4_width = max_col_width
-                if (col5_width > max_col_width) col5_width = max_col_width
-                
-                # Ensure minimum width
-                if (col1_width < 20) col1_width = 20
-                if (col2_width < 20) col2_width = 20
-                if (col3_width < 20) col3_width = 20
-                if (col4_width < 15) col4_width = 15
-                if (col5_width < 15) col5_width = 15
+                # No maximum cap - columns will expand to fit full paths
                 
                 separator_width = col1_width + col2_width + col3_width + col4_width + col5_width + 16
             }
@@ -706,30 +701,17 @@ generate_deep_dive_report() {
                 # Print data rows (only up to max_rows, no empty rows)
                 for (i = 1; i <= max_rows; i++) {
                     printf "%-*s | %-*s | %-*s | %-*s | %-*s\n",
-                        col1_width, (i <= r_count ? truncate_if_needed(replaced[i], col1_width) : ""),
-                        col2_width, (i <= as_count ? truncate_if_needed(added_stock[i], col2_width) : ""),
-                        col3_width, (i <= c_count ? truncate_if_needed(changed[i], col3_width) : ""),
-                        col4_width, (i <= nf_count ? truncate_if_needed(new_files[i], col4_width) : ""),
-                        col5_width, (i <= d_count ? truncate_if_needed(deleted[i], col5_width) : "")
+                        col1_width, (i <= r_count ? replaced[i] : ""),
+                        col2_width, (i <= as_count ? added_stock[i] : ""),
+                        col3_width, (i <= c_count ? changed[i] : ""),
+                        col4_width, (i <= nf_count ? new_files[i] : ""),
+                        col5_width, (i <= d_count ? deleted[i] : "")
                 }
                 printf "\n"
                 
                 # Print summary counts
                 printf "TOTALS: %d replaced, %d added, %d changed, %d new, %d deleted\n\n", 
                     r_count, as_count, c_count, nf_count, d_count
-            }
-            
-            function basename(path) {
-                # Extract filename from full path
-                gsub(/.*\//, "", path)
-                return path
-            }
-            
-            function truncate_if_needed(text, width) {
-                if (length(text) > width) {
-                    return substr(text, 1, width - 3) "..."
-                }
-                return text
             }
             ' "$TEMP_DIR/dd_replaced.list" "$TEMP_DIR/dd_added_stock.list" "$TEMP_DIR/dd_changed.list" "$TEMP_DIR/dd_new.list" "$TEMP_DIR/dd_deleted.list"
             
