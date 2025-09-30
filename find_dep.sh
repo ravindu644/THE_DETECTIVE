@@ -602,6 +602,32 @@ generate_references_file() {
     finalize_status
     print_success "References analysis complete: $references_file"
     
+    # Remove duplicate files from REFERENCES that exist in main analysis
+    print_info "Removing duplicate files from REFERENCES folder..."
+    local duplicates_removed=0
+    
+    if [[ -d "$refs_dir" ]]; then
+        while IFS= read -r ref_file; do
+            # Get the relative path from REFERENCES folder
+            local rel_from_refs
+            rel_from_refs=$(realpath --relative-to="$refs_dir" "$ref_file")
+            
+            # Check if same file exists in main analysis
+            local main_file="$main_analysis_dir/$rel_from_refs"
+            
+            if [[ -f "$main_file" ]]; then
+                # File exists in main analysis, remove from references
+                rm -f "$ref_file"
+                ((duplicates_removed++))
+            fi
+        done < <(find "$refs_dir" -type f ! -name "REFERENCES*.txt" ! -name ".deps_map" 2>/dev/null)
+        
+        # Clean up empty directories in REFERENCES
+        find "$refs_dir" -type d -empty -delete 2>/dev/null
+        
+        print_success "Removed $duplicates_removed duplicate files from REFERENCES."
+    fi
+    
     find_and_copy_hal_files "$hal_analysis_dir" "$extracted_root" APPROVED_LIBS
 }
 
