@@ -16,9 +16,11 @@ declare -A COPIED_LIBS_PATHS
 declare -A APPROVED_LIBS      # Libraries user wants to analyze
 declare -A REJECTED_LIBS      # Libraries user explicitly rejected
 declare -A PENDING_ANALYSIS   # New libraries found in current iteration
+declare -A WHITELISTED_FILES  # Files that should be skipped/ignored
 MISSING_DEPS=""
 COPIED_LIBS_FALLBACK=""
 PROCESSED_LIBS_FALLBACK=""
+COPY_WHITELISTED=false        # Whether to copy whitelisted files
 
 # State files
 STATE_FILE=""
@@ -99,6 +101,34 @@ clean_path() {
     fi
     input="${input/#\~/$HOME}"
     echo "$input"
+}
+
+# Load whitelist file (expects paths, extracts basenames)
+load_whitelist() {
+    local whitelist_file="$1"
+    [[ ! -f "$whitelist_file" ]] && return 1
+    
+    local count=0
+    while IFS= read -r line; do
+        line=$(clean_path "$line")
+        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ^# ]] && continue
+        
+        # Extract basename only
+        local basename_only=$(basename "$line")
+        WHITELISTED_FILES["$basename_only"]=1
+        ((count++))
+    done < "$whitelist_file"
+    
+    print_success "Loaded $count whitelisted files."
+    return 0
+}
+
+# Check if a file is whitelisted
+is_whitelisted() {
+    local file_path="$1"
+    local basename_only=$(basename "$file_path")
+    [[ -n "${WHITELISTED_FILES[$basename_only]}" ]]
 }
 
 # Function to find all instances of a library file
@@ -219,6 +249,11 @@ finalize_status() {
 should_analyze_library() {
     local lib_name="$1"
     
+    # Check if whitelisted
+    if is_whitelisted "$lib_name"; then
+        return 3  # Special code: whitelisted
+    fi
+    
     # If explicitly rejected, never analyze
     if [[ -n "${REJECTED_LIBS[$lib_name]}" ]]; then
         return 1
@@ -253,6 +288,14 @@ analyze_dependencies() {
         return 0
     fi
     
+    if [[ $should_analyze -eq 3 ]]; then
+        # Whitelisted - copy only if user wants, but don't analyze dependencies
+        if [[ "$COPY_WHITELISTED" == "true" ]]; then
+            copy_with_structure "$lib_file" "$extracted_root" "$main_analysis_dir"
+        fi
+        return 0
+    fi
+    
     update_status "Analyzing: $lib_name (Total processed: $TOTAL_DEPS_PROCESSED)"
 
     local abs_path
@@ -277,6 +320,19 @@ analyze_dependencies() {
             # Rejected - skip this dependency
             continue
         fi
+        
+        if [[ $dep_should_analyze -eq 3 ]]; then
+            # Whitelisted dependency
+            if [[ "$COPY_WHITELISTED" == "true" ]]; then
+                mapfile -t dep_paths_arr < <(resolve_soname "$dep" "$lib_file" "$extracted_root")
+                if [[ ${#dep_paths_arr[@]} -gt 0 ]]; then
+                    for dep_path in "${dep_paths_arr[@]}"; do
+                        copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
+                    done
+                fi
+            fi
+            continue
+        fi
 
         mapfile -t dep_paths_arr < <(resolve_soname "$dep" "$lib_file" "$extracted_root")
 
@@ -291,8 +347,8 @@ analyze_dependencies() {
                 if [[ -z "${PROCESSED_PATHS[$dep_realpath]}" ]]; then
                     copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
                     
-                    # Only recurse if approved or pending (not rejected)
-                    if [[ $dep_should_analyze -ne 1 ]]; then
+                    # Only recurse if approved or pending (not rejected or whitelisted)
+                    if [[ $dep_should_analyze -ne 1 && $dep_should_analyze -ne 3 ]]; then
                         analyze_dependencies "$dep_path" "$extracted_root" "$main_analysis_dir" $((depth + 1))
                     fi
                 else
@@ -721,6 +777,39 @@ main() {
                 print_error "File not found: $suspects_file"
             fi
         done
+        
+        # Ask for whitelist file (optional)
+        echo
+        read -p "Do you have a whitelist file? (y/N): " has_whitelist
+        if [[ "$has_whitelist" =~ ^[Yy]$ ]]; then
+            while true; do
+                read -p "Enter path to whitelist file: " whitelist_input
+                local whitelist_file=$(clean_path "$whitelist_input")
+                if [[ -f "$whitelist_file" ]]; then
+                    whitelist_file=$(realpath "$whitelist_file")
+                    if load_whitelist "$whitelist_file"; then
+                        print_info "Whitelist loaded with ${#WHITELISTED_FILES[@]} files."
+                        echo
+                        read -p "Copy whitelisted files to MAIN_ANALYSIS if they're dependencies? (y/N): " copy_wl
+                        if [[ "$copy_wl" =~ ^[Yy]$ ]]; then
+                            COPY_WHITELISTED=true
+                            print_info "Whitelisted files WILL be copied if detected as dependencies."
+                        else
+                            COPY_WHITELISTED=false
+                            print_info "Whitelisted files will be IGNORED completely."
+                        fi
+                    fi
+                    break
+                else
+                    print_error "File not found: $whitelist_file"
+                    read -p "Try again? (Y/n): " retry
+                    if [[ "$retry" =~ ^[Nn]$ ]]; then
+                        print_info "Proceeding without whitelist."
+                        break
+                    fi
+                fi
+            done
+        fi
     fi
     
     local extracted_root
@@ -765,6 +854,15 @@ main() {
     
     if [[ ${#APPROVED_LIBS[@]} -gt 0 ]] || [[ ${#REJECTED_LIBS[@]} -gt 0 ]]; then
         print_info "Loaded state: ${#APPROVED_LIBS[@]} approved, ${#REJECTED_LIBS[@]} rejected"
+    fi
+    
+    if [[ ${#WHITELISTED_FILES[@]} -gt 0 ]]; then
+        print_info "Whitelist active: ${#WHITELISTED_FILES[@]} files will be skipped"
+        if [[ "$COPY_WHITELISTED" == "true" ]]; then
+            print_info "Whitelisted files WILL be copied if they're dependencies"
+        else
+            print_info "Whitelisted files will be IGNORED completely"
+        fi
     fi
     
     local main_analysis_dir="$output_root/MAIN_ANALYSIS"
