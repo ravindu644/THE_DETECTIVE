@@ -35,6 +35,27 @@ fi
 
 # Collect symlink path and its target (do NOT resolve to the target path only)
 symlink_results=$("${symlink_cmd[@]}" 2>/dev/null | while IFS= read -r symlink; do
+    # Apply same blacklist rules as for regular files: extension and patterns
+    ext="${symlink##*.}"
+    skip=0
+    # Blacklist extensions
+    for bl_ext in "${EXTENSIONS[@]}"; do
+        if [[ "${ext,,}" == "${bl_ext,,}" ]]; then
+            skip=1
+            break
+        fi
+    done
+    # Blacklist patterns (in symlink path)
+    if [ $skip -eq 0 ] && [ "${#PATTERNS[@]}" -gt 0 ]; then
+        for pat in "${PATTERNS[@]}"; do
+            if [[ "$symlink" == *"$pat"* ]]; then
+                skip=1
+                break
+            fi
+        done
+    fi
+    [ $skip -eq 1 ] && continue
+
     # readlink returns the link target (may be relative). Keep the symlink path as-is.
     target=$(readlink "$symlink" 2>/dev/null || true)
     printf '%s -> %s\n' "$symlink" "${target:-(no target)}"
