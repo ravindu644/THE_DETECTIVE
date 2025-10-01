@@ -316,24 +316,7 @@ analyze_dependencies() {
         should_analyze_library "$dep"
         local dep_should_analyze=$?
         
-        if [[ $dep_should_analyze -eq 1 ]]; then
-            # Rejected - skip this dependency
-            continue
-        fi
-        
-        if [[ $dep_should_analyze -eq 3 ]]; then
-            # Whitelisted dependency
-            if [[ "$COPY_WHITELISTED" == "true" ]]; then
-                mapfile -t dep_paths_arr < <(resolve_soname "$dep" "$lib_file" "$extracted_root")
-                if [[ ${#dep_paths_arr[@]} -gt 0 ]]; then
-                    for dep_path in "${dep_paths_arr[@]}"; do
-                        copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
-                    done
-                fi
-            fi
-            continue
-        fi
-
+        # Resolve the dependency first
         mapfile -t dep_paths_arr < <(resolve_soname "$dep" "$lib_file" "$extracted_root")
 
         if [[ ${#dep_paths_arr[@]} -gt 0 ]]; then
@@ -344,11 +327,23 @@ analyze_dependencies() {
                 emit_graph_edge "$abs_path" "$dep_path"
 
                 dep_realpath=$(realpath -m "$dep_path" 2>/dev/null || printf "%s" "$dep_path")
+                
+                # Always copy the dependency if found
                 if [[ -z "${PROCESSED_PATHS[$dep_realpath]}" ]]; then
-                    copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
-                    
-                    # Only recurse if approved or pending (not rejected or whitelisted)
-                    if [[ $dep_should_analyze -ne 1 && $dep_should_analyze -ne 3 ]]; then
+                    # Handle different cases
+                    if [[ $dep_should_analyze -eq 1 ]]; then
+                        # Rejected - copy but don't analyze further
+                        copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
+                        PROCESSED_PATHS["$dep_realpath"]=1
+                    elif [[ $dep_should_analyze -eq 3 ]]; then
+                        # Whitelisted - copy only if user wants
+                        if [[ "$COPY_WHITELISTED" == "true" ]]; then
+                            copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
+                        fi
+                        PROCESSED_PATHS["$dep_realpath"]=1
+                    else
+                        # Approved or pending - copy and recurse
+                        copy_with_structure "$dep_path" "$extracted_root" "$main_analysis_dir"
                         analyze_dependencies "$dep_path" "$extracted_root" "$main_analysis_dir" $((depth + 1))
                     fi
                 else
