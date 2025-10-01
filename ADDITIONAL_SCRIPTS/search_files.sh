@@ -33,9 +33,12 @@ if [ "${#KEYWORDS[@]}" -gt 0 ] && [ -n "${KEYWORDS[0]}" ]; then
     symlink_cmd+=(')')
 fi
 
-symlink_results=$("${symlink_cmd[@]}" 2>/dev/null | while read -r symlink; do
-    realpath "$symlink"
-done | sort | uniq)
+# Collect symlink path and its target (do NOT resolve to the target path only)
+symlink_results=$("${symlink_cmd[@]}" 2>/dev/null | while IFS= read -r symlink; do
+    # readlink returns the link target (may be relative). Keep the symlink path as-is.
+    target=$(readlink "$symlink" 2>/dev/null || true)
+    printf '%s -> %s\n' "$symlink" "${target:-(no target)}"
+done | sort -u)
 
 # --- Find regular files matching keywords, ignoring symlinks ---
 find_cmd=(find "$SEARCH_DIRECTORY" -type f ! -xtype l)
@@ -98,14 +101,30 @@ if [[ "$SAVE_CHOICE" =~ ^[yY]$ ]]; then
     # Remove quotes if any
     FOLDER_PATH=$(echo "$FOLDER_PATH" | tr -d '"')
     mkdir -p "$FOLDER_PATH"
-    # Save results
+
+    # Save regular file results (unchanged behavior)
     if [ -n "$results" ]; then
         echo "$results" > "$FOLDER_PATH/search_results.txt"
         echo "Search results saved to $FOLDER_PATH/search_results.txt."
     fi
+
+    # Save symlink info and copy symlinks into a dedicated subfolder preserving structure
     if [ -n "$symlink_results" ]; then
         echo "$symlink_results" > "$FOLDER_PATH/symlink_info.txt"
         echo "Symlink info saved to $FOLDER_PATH/symlink_info.txt."
+
+        # Create symlink target folder
+        symlink_dest="$FOLDER_PATH/symlinks"
+        while IFS= read -r line; do
+            # Extract original symlink path (before " -> ")
+            symlink_path="${line%% -> *}"
+            # Compute relative path to preserve directory structure
+            rel="${symlink_path#$SEARCH_DIRECTORY/}"
+            dest_path="$symlink_dest/$rel"
+            mkdir -p "$(dirname "$dest_path")" && cp -a -- "$symlink_path" "$dest_path" || echo "Failed to copy symlink: $symlink_path"
+        done <<< "$symlink_results"
+
+        echo "Symlinks copied into $symlink_dest (preserving structure)."
     fi
 else
     echo "Exiting without saving."
