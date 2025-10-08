@@ -78,7 +78,13 @@ selected_process=${process_options[$selected_index]}
 clear
 echo -e "${CYAN}${BOLD}Selected: $selected_process${NC}\n"
 
-# Step 4: Extract dependencies using `su -c`
+# Step 6: Ask for output folder
+echo -ne "${YELLOW}Enter output folder for saved files (default: current directory):${NC} "
+read -r output_folder
+if [ -z "$output_folder" ]; then
+    output_folder="."
+fi
+mkdir -p "$output_folder"
 echo -e "${BLUE}Extracting dependencies from /proc (with root)...${NC}"
 dependencies=$(adb shell "su -c 'cat /proc/$selected_pid/maps'" | awk '/\.so/ {print $NF}' | sort -u)
 if [ -z "$dependencies" ]; then echo -e "${RED}No .so dependencies found for PID: $selected_pid${NC}"; exit 1; fi
@@ -98,28 +104,68 @@ echo -e "\n${GREEN}Total unique dependencies found: $dep_count${NC}\n"
 echo -ne "${YELLOW}Would you like to save this dependency list to a text file? (y/n):${NC} "
 read -r save_choice
 
-if [[ $save_choice == "y" || $save_choice == "Y" ]]; then
-    # Propose a default filename
-    default_filename="deps_${selected_pid}.txt"
-    echo -ne "${YELLOW}Enter filename to save as (default: ${default_filename}):${NC} "
-    read -r custom_filename
+# Step 7: Offer to copy the actual library files to host
+echo -ne "${YELLOW}Would you like to copy the actual library files to the host machine? (y/n):${NC} "
+read -r copy_choice
 
-    # Use the default if the user just presses Enter
-    if [ -z "$custom_filename" ]; then
-        final_filename=$default_filename
+if [[ $copy_choice == "y" || $copy_choice == "Y" ]]; then
+    # Determine base name for output folder
+    if [[ $save_choice == "y" || $save_choice == "Y" ]]; then
+        echo -ne "${YELLOW}Enter name for the dependency list file (default: deps_${selected_pid}):${NC} "
+        read -r custom_filename
+        if [ -z "$custom_filename" ]; then
+            base_name="deps_${selected_pid}"
+        else
+            base_name="$custom_filename"
+        fi
     else
-        final_filename=$custom_filename
+        base_name="deps_${selected_pid}"
+    fi
+
+    # Create temporary folder on device
+    temp_folder="tmp_libs_${selected_pid}"
+    device_temp_path="/sdcard/$temp_folder"
+    adb shell "su -c 'mkdir -p \"$device_temp_path\"'"
+    # Copy libraries to temp folder
+    echo -e "${BLUE}Copying libraries to device temp folder...${NC}"
+    copied_count=0
+    failed_count=0
+    
+    for lib_path in $dependencies; do
+        if [ -z "$lib_path" ]; then continue; fi
+        
+        output=$(adb shell "su -c 'if cp --parents \"$lib_path\" \"$device_temp_path\" 2>/dev/null; then echo copied; fi'")
+        if [ "$output" = "copied" ]; then
+            echo "  COPIED: $lib_path"
+            copied_count=$((copied_count + 1))
+        else
+            echo "  FAILED: $lib_path"
+            failed_count=$((failed_count + 1))
+        fi
+    done
+    
+    # Pull the temp folder to host
+    host_output_folder="$output_folder/$base_name"
+    echo -e "${BLUE}Pulling libraries to host folder: $host_output_folder${NC}"
+    adb pull "$device_temp_path" "$host_output_folder"
+    adb shell "rm -rf '$device_temp_path'"
+    
+    # Save the dependency list if requested
+    if [[ $save_choice == "y" || $save_choice == "Y" ]]; then
+        txt_file="$host_output_folder/${base_name}.txt"
+        echo "$dependencies" > "$txt_file"
+        if [ -f "$txt_file" ]; then
+            echo -e "\n${GREEN}Successfully saved dependency list to: $txt_file${NC}"
+        else
+            echo -e "\n${RED}Error: Failed to save file.${NC}"
+        fi
     fi
     
-    # Save the file
-    echo "$dependencies" > "$final_filename"
-    
-    # Confirm saving
-    if [ -f "$final_filename" ]; then
-        echo -e "\n${GREEN}Successfully saved dependency list to: $(pwd)/${final_filename}${NC}"
-    else
-        echo -e "\n${RED}Error: Failed to save file.${NC}"
-    fi
+    # Summary
+    echo -e "${CYAN}${BOLD}Copy Summary${NC}"
+    echo "Successfully copied: $copied_count files"
+    echo "Libraries saved to: $host_output_folder"
+    echo "Note: Failures are expected for files in protected areas like /apex."
 fi
 
 echo -e "\n${CYAN}Done!${NC}"
